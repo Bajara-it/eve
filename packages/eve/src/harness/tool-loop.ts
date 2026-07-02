@@ -120,6 +120,7 @@ import {
   summarizeKnownModelCallConfigError,
   summarizeKnownModelCallRequestError,
 } from "#harness/model-call-error.js";
+import { throwIfTurnAborted } from "#harness/turn-cancellation.js";
 import type { JsonObject, JsonValue } from "#shared/json.js";
 import {
   CONDITIONAL_DELIVERY_INSTRUCTION,
@@ -519,6 +520,7 @@ export function createToolLoopHarness(config: ToolLoopHarnessConfig): StepFn {
     const attributionHeaders = buildGatewayAttributionHeaders(model, config.runtimeIdentity);
 
     ({ messages, session } = await maybeCompact({
+      abortSignal: config.abortSignal,
       emit,
       emissionState,
       headers: attributionHeaders,
@@ -747,7 +749,10 @@ export function createToolLoopHarness(config: ToolLoopHarnessConfig): StepFn {
             FINAL_OUTPUT_TOOL_NAME,
             ...hiddenRuntimeActionToolNames,
           ]);
-          const streamResult = await agent.stream({ messages: callMessages });
+          const streamResult = await agent.stream({
+            abortSignal: config.abortSignal,
+            messages: callMessages,
+          });
           const {
             emittedActionCallIds,
             handledInlineToolResultCallIds,
@@ -758,6 +763,7 @@ export function createToolLoopHarness(config: ToolLoopHarnessConfig): StepFn {
             excludedActionToolNames,
             tools: config.tools,
           });
+          throwIfTurnAborted(config.abortSignal);
           const stepResult = await hooks.stepResult;
           if (
             isEmptyModelResponse(stepResult) &&
@@ -817,7 +823,8 @@ export function createToolLoopHarness(config: ToolLoopHarnessConfig): StepFn {
           }
           return stepResult;
         }
-        await agent.generate({ messages: callMessages });
+        await agent.generate({ abortSignal: config.abortSignal, messages: callMessages });
+        throwIfTurnAborted(config.abortSignal);
         const stepResult = await hooks.stepResult;
         if (isEmptyModelResponse(stepResult)) {
           throw new EmptyModelResponseError();
@@ -831,6 +838,7 @@ export function createToolLoopHarness(config: ToolLoopHarnessConfig): StepFn {
           sessionId: session.sessionId,
           turnId: emissionState.turnId,
         },
+        config.abortSignal,
       );
     };
 
@@ -876,6 +884,8 @@ export function createToolLoopHarness(config: ToolLoopHarnessConfig): StepFn {
         suppressStepStartedEmission: true,
       });
     } catch (error) {
+      throwIfTurnAborted(config.abortSignal);
+
       // Stage order: drop a gateway-rejected provider tool first, then
       // reissue an empty response; see runModelCallRecoveryPipeline for
       // the skip/act semantics.
@@ -900,6 +910,7 @@ export function createToolLoopHarness(config: ToolLoopHarnessConfig): StepFn {
             }),
         ],
       });
+      throwIfTurnAborted(config.abortSignal);
 
       if (recoveryResult.outcome === "recovered") {
         result = recoveryResult.result;
@@ -2110,6 +2121,7 @@ function createNextCompactionConfig(
  * harness uses to rebuild `session.history` after the step.
  */
 async function maybeCompact(input: {
+  readonly abortSignal?: AbortSignal;
   readonly emit?: ToolLoopHarnessConfig["handleEvent"];
   readonly emissionState: ReturnType<typeof getHarnessEmissionState>;
   readonly headers?: Record<string, string>;
@@ -2154,6 +2166,7 @@ async function maybeCompact(input: {
     compaction.providerOptions,
     input.telemetry,
     input.headers,
+    input.abortSignal,
   );
 
   if (input.onCompaction) {
@@ -2202,11 +2215,14 @@ function resolveApprovalKeyFromTools(
 async function runModelCallWithRetries<T>(
   fn: () => Promise<T>,
   diag: { readonly sessionId: string; readonly turnId: string },
+  abortSignal?: AbortSignal,
 ): Promise<T> {
   for (let attempt = 1; ; attempt++) {
+    throwIfTurnAborted(abortSignal);
     try {
       return await fn();
     } catch (error) {
+      throwIfTurnAborted(abortSignal);
       if (attempt === MODEL_CALL_MAX_ATTEMPTS || classifyModelCallError(error) !== "retry") {
         throw error;
       }

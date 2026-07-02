@@ -613,6 +613,9 @@ export async function emitStreamContent(
         // `cause` instead of degrading to `new Error("[object Object]")`.
         streamError = toError(part.error);
         break;
+      case "abort":
+        // The SDK does not resolve step results for aborted in-flight steps.
+        throw new DOMException(part.reason ?? "The model stream was aborted.", "AbortError");
       default:
         break;
     }
