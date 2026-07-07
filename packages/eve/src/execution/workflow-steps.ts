@@ -340,6 +340,7 @@ export async function turnStep(rawInput: TurnStepInput): Promise<DurableStepResu
           nodeId: bundle.nodeId,
         },
         node: bundle.graph.root,
+        workflowMaxSubagents: refreshedSession.workflowMaxSubagents,
       });
       return step(refreshedSession, stepInput);
     };
