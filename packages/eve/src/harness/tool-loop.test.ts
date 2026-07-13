@@ -45,7 +45,6 @@ import {
   getSessionTokenUsage,
   setTurnUsageState,
 } from "#harness/turn-tag-state.js";
-import { DEFAULT_SUBAGENT_MAX_DEPTH } from "#harness/subagent-depth.js";
 import type { HarnessEmitFn, HarnessSession, ToolLoopHarnessConfig } from "#harness/types.js";
 import {
   CONDITIONAL_DELIVERY_INSTRUCTION,
@@ -792,7 +791,7 @@ describe("createToolLoopHarness", () => {
     expect(third.session.compaction.threshold).toBe(90_000);
   });
 
-  it("hides subagent tools from the model after the subagent depth limit", async () => {
+  it("keeps declared subagent tools visible in deeply nested sessions", async () => {
     setupMockAgent({
       finishReason: "stop",
       response: { messages: [{ content: "Hello!", role: "assistant" }] },
@@ -806,17 +805,17 @@ describe("createToolLoopHarness", () => {
     });
     const runStep = createToolLoopHarness(config);
 
-    await runStep(createTestSession({ subagentDepth: DEFAULT_SUBAGENT_MAX_DEPTH }), {
+    await runStep(createTestSession({ subagentDepth: 99 }), {
       message: "Hi",
     });
 
     const agentCall = vi.mocked(ToolLoopAgent).mock.calls[0]?.[0];
     expect(agentCall).toBeDefined();
     expect(agentCall!.tools).toHaveProperty("add");
-    expect(agentCall!.tools).not.toHaveProperty("delegate");
+    expect(agentCall!.tools).toHaveProperty("delegate");
   });
 
-  it("publishes subagent calls from the current run immediately before the depth limit", async () => {
+  it("publishes declared subagent calls from nested sessions", async () => {
     setupMockAgent({
       finishReason: "tool-calls",
       response: {
@@ -851,12 +850,9 @@ describe("createToolLoopHarness", () => {
       createTestConfig("conversation", emit, { tools: createDelegationToolMap() }),
     );
 
-    const result = await runStep(
-      createTestSession({ subagentDepth: DEFAULT_SUBAGENT_MAX_DEPTH - 1 }),
-      {
-        message: "Hi",
-      },
-    );
+    const result = await runStep(createTestSession({ subagentDepth: 98 }), {
+      message: "Hi",
+    });
 
     expect(events.find((event) => event.type === "actions.requested")?.data.actions).toEqual([
       {
@@ -882,7 +878,7 @@ describe("createToolLoopHarness", () => {
     ]);
   });
 
-  it("does not publish subagent calls from the current run at the depth limit", async () => {
+  it("publishes declared subagent calls from deeply nested sessions", async () => {
     setupMockAgent({
       finishReason: "tool-calls",
       response: {
@@ -911,30 +907,27 @@ describe("createToolLoopHarness", () => {
       ],
       toolResults: [],
     });
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-
     const { emit, events } = createEventCollector();
     const runStep = createToolLoopHarness(
       createTestConfig("conversation", emit, { tools: createDelegationToolMap() }),
     );
 
-    const result = await runStep(createTestSession({ subagentDepth: DEFAULT_SUBAGENT_MAX_DEPTH }), {
+    const result = await runStep(createTestSession({ subagentDepth: 99 }), {
       message: "Hi",
     });
 
-    expect(events.some((event) => event.type === "actions.requested")).toBe(false);
-    expect(getPendingRuntimeActionBatch(result.session.state)).toBeUndefined();
-    expect(warn).toHaveBeenCalledWith(
-      "[eve:harness.tool-loop] runtime action tool call blocked because tool is not advertised",
+    expect(events.find((event) => event.type === "actions.requested")?.data.actions).toEqual([
       expect.objectContaining({
         callId: "call-1",
-        sessionId: "test-session",
-        toolName: "delegate",
+        kind: "subagent-call",
+        name: "delegate",
+        subagentName: "worker",
       }),
-    );
+    ]);
+    expect(getPendingRuntimeActionBatch(result.session.state)?.actions).toHaveLength(1);
   });
 
-  it("omits Workflow when subagent host tools are hidden by the depth limit", async () => {
+  it("keeps declared subagent tools when Workflow is unavailable outside the root", async () => {
     setupMockAgent({
       finishReason: "stop",
       response: { messages: [{ content: "Hello!", role: "assistant" }] },
@@ -963,13 +956,13 @@ describe("createToolLoopHarness", () => {
     });
     const runStep = createToolLoopHarness(config);
 
-    await runStep(createTestSession({ subagentDepth: DEFAULT_SUBAGENT_MAX_DEPTH }), {
+    await runStep(createTestSession({ subagentDepth: 99 }), {
       message: "Hi",
     });
 
     const agentCall = vi.mocked(ToolLoopAgent).mock.calls[0]?.[0];
     expect(agentCall).toBeDefined();
-    expect(agentCall!.tools).not.toHaveProperty("delegate");
+    expect(agentCall!.tools).toHaveProperty("delegate");
     expect(agentCall!.tools).not.toHaveProperty("Workflow");
   });
 
@@ -992,7 +985,6 @@ describe("createToolLoopHarness", () => {
       createTestSession({
         rootSessionId: "root-session",
         subagentDepth: 1,
-        subagentMaxDepth: 2,
       }),
       { message: "Hi" },
     );
