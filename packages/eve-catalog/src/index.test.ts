@@ -63,4 +63,10 @@ describe("integration catalog", () => {
       "https://mcp.onkernel.com/mcp",
     );
   });
+
+  it("uses Browser Use's streamable HTTP MCP endpoint", () => {
+    expect(getIntegrationEntry("browser-use")!.connection!.mcp!.url).toBe(
+      "https://api.browser-use.com/v3/mcp",
+    );
+  });
 });

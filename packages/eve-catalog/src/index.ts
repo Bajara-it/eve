@@ -191,6 +191,18 @@ export const INTEGRATIONS: readonly IntegrationEntry[] = [
     },
   },
   {
+    slug: "browser-use",
+    name: "Browser Use",
+    kind: "connection",
+    tagline: "Run managed browser automation tasks through Browser Use's MCP server.",
+    surfaces: { scaffoldable: false, gallery: true },
+    connection: {
+      description:
+        "Browser Use: run browser automation tasks, inspect sessions, and manage browser profiles.",
+      mcp: { url: "https://api.browser-use.com/v3/mcp" },
+    },
+  },
+  {
     slug: "linear",
     name: "Linear",
     kind: "connection",
