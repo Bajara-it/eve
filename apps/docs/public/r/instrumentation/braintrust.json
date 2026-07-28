@@ -3,9 +3,7 @@
   "name": "instrumentation/braintrust",
   "title": "Braintrust",
   "description": "Trace eve agent sessions in Braintrust, including turns, steps, tool calls, and subagent interactions.",
-  "dependencies": [
-    "braintrust"
-  ],
+  "dependencies": ["braintrust"],
   "files": [
     {
       "path": "registry/instrumentation/braintrust.ts",

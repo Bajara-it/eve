@@ -259,11 +259,7 @@
     "eve": {
       "setup": {
         "command": "eve",
-        "args": [
-          "integration",
-          "setup",
-          "web"
-        ]
+        "args": ["integration", "setup", "web"]
       },
       "requires": ">=0.27.8"
     }
