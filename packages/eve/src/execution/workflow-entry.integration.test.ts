@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { getWorld, resumeHook, start } from "#internal/workflow/runtime.js";
 
+import { createSendFn } from "#channel/send.js";
 import { captureTurnEvents, filterEventsByType } from "#internal/testing/events.js";
 import { createTestRuntime } from "#internal/testing/app-harness.js";
 import { waitForHook } from "#internal/testing/workflow-test-helpers.js";
@@ -15,7 +16,7 @@ import { createWorkflowRuntime } from "#execution/workflow-runtime.js";
 import { normalizeEveAttributes } from "#runtime/attributes/normalize.js";
 import { ROOT_COMPILED_AGENT_NODE_ID } from "#compiler/manifest.js";
 import { ConnectionAuthorizationRequiredError } from "#public/connections/errors.js";
-import type { UnstampedMessageStreamEvent, MessageStreamEvent } from "#protocol/message.js";
+import type { MessageStreamEvent } from "#protocol/message.js";
 import { isEventId } from "#protocol/event-id.js";
 import type { ToolContext } from "#public/definitions/tool.js";
 import type { AuthorizationDefinition, TokenResult } from "#runtime/connections/types.js";
@@ -354,6 +355,63 @@ describe("workflowEntry integration", () => {
     });
   });
 
+  it("completes an expired conversation and lets its channel start a fresh session", async () => {
+    const runtime = createTestRuntime({ agent: { name: "workflow-entry-timeout" } });
+    const continuationToken = "http:workflow-entry-timeout";
+    const workflowRuntime = createWorkflowRuntime({
+      compiledArtifactsSource: createBundledRuntimeCompiledArtifactsSource(),
+    });
+
+    await runtime.run(async () => {
+      const run = await start(workflowEntry, [
+        {
+          input: { message: "hello there" },
+          serializedContext: buildSerializedContext({
+            channelKind: "http",
+            continuationToken,
+            mode: "conversation",
+          }),
+          sessionTimeoutMs: 25,
+        },
+      ]);
+      const stream = captureEvents(run);
+      let replacementSessionId: string | undefined;
+
+      try {
+        const events = await stream.nextUntil(
+          "session completion",
+          (event) => event.type === "session.completed",
+        );
+
+        expect(events.some((event) => event.type === "session.waiting")).toBe(true);
+        expect(events.at(-1)?.type).toBe("session.completed");
+        expect(isEventId(events.at(-1)?.meta.id ?? "")).toBe(true);
+        expect(filterEventsByType(events, "session.failed")).toHaveLength(0);
+        await expect(run.returnValue).resolves.toEqual({ output: "" });
+
+        const send = createSendFn(workflowRuntime, { kind: "http" }, "http");
+        const replacement = await send("start fresh", {
+          auth: null,
+          continuationToken: "workflow-entry-timeout",
+        });
+        replacementSessionId = replacement.id;
+
+        expect(replacement.id).not.toBe(run.runId);
+        await waitForHook(
+          { runId: replacement.id },
+          {
+            token: continuationToken,
+          },
+        );
+      } finally {
+        stream.dispose();
+        if (replacementSessionId !== undefined) {
+          await workflowRuntime.terminateSession({ sessionId: replacementSessionId });
+        }
+      }
+    });
+  });
+
   it("fails a competing continuation owner before its first turn", async () => {
     const runtime = createTestRuntime({ agent: { name: "workflow-entry-hook-owner" } });
     const continuationToken = "http:workflow-entry-hook-owner";
@@ -645,8 +703,8 @@ interface CapturedEventStream {
   dispose(): void;
   nextUntil(
     label: string,
-    predicate: (event: UnstampedMessageStreamEvent) => boolean,
-  ): Promise<UnstampedMessageStreamEvent[]>;
+    predicate: (event: MessageStreamEvent) => boolean,
+  ): Promise<MessageStreamEvent[]>;
 }
 
 function captureEvents(run: Parameters<typeof captureTurnEvents>[0]): CapturedEventStream {
@@ -677,9 +735,9 @@ async function readUntil(
   reader: ReadableStreamDefaultReader<Uint8Array>,
   decoder: InstanceType<typeof TextDecoder>,
   initialBuffer: string,
-  predicate: (event: UnstampedMessageStreamEvent) => boolean,
-): Promise<{ buffer: string; events: UnstampedMessageStreamEvent[] }> {
-  const events: UnstampedMessageStreamEvent[] = [];
+  predicate: (event: MessageStreamEvent) => boolean,
+): Promise<{ buffer: string; events: MessageStreamEvent[] }> {
+  const events: MessageStreamEvent[] = [];
   let buffer = initialBuffer;
 
   while (true) {
@@ -703,7 +761,7 @@ async function readUntil(
         continue;
       }
 
-      const event = JSON.parse(line) as UnstampedMessageStreamEvent;
+      const event = JSON.parse(line) as MessageStreamEvent;
       events.push(event);
 
       if (predicate(event)) {
