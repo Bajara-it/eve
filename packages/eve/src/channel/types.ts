@@ -1,6 +1,6 @@
 import type { UserContent } from "ai";
 
-import type { HandleMessageStreamEvent } from "#protocol/message.js";
+import type { UnstampedMessageStreamEvent, MessageStreamEvent } from "#protocol/message.js";
 import type { CancelTurnStatus } from "#protocol/cancel-turn.js";
 import type { RunMode } from "#shared/run-mode.js";
 import type { RuntimeActionResult } from "#runtime/actions/types.js";
@@ -104,7 +104,7 @@ export interface SessionAuthContext {
  * Backed by `getWritable()` in the workflow runtime. Not part of the adapter
  * interface: the runtime always writes events itself.
  */
-export type EventEmitFn = (event: HandleMessageStreamEvent) => Promise<void>;
+export type EventEmitFn = (event: UnstampedMessageStreamEvent) => Promise<void>;
 
 // ---------------------------------------------------------------------------
 // Deliver payload
@@ -189,7 +189,7 @@ export interface SubagentInputRequestHookPayload {
 
 /** Authorization lifecycle event forwarded from a delegated child. */
 export type SubagentAuthorizationEvent = Extract<
-  HandleMessageStreamEvent,
+  UnstampedMessageStreamEvent,
   { type: "authorization.required" | "authorization.completed" }
 >;
 
@@ -371,7 +371,7 @@ export type RunResult =
  */
 export interface RunHandle {
   readonly continuationToken: string;
-  readonly events: ReadableStream<HandleMessageStreamEvent>;
+  readonly events: ReadableStream<MessageStreamEvent>;
   /**
    * Runtime-owned identifier for this session. Stream and inspection APIs
    * key on it: workflow-backed runs expose the workflow run id.
@@ -425,7 +425,7 @@ export interface Runtime {
   getEventStream(
     sessionId: string,
     options?: GetEventStreamOptions,
-  ): Promise<ReadableStream<HandleMessageStreamEvent>>;
+  ): Promise<ReadableStream<MessageStreamEvent>>;
 
   /**
    * Resolves the durable tail of a session's event stream: the zero-based

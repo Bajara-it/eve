@@ -15,7 +15,8 @@ import { createWorkflowRuntime } from "#execution/workflow-runtime.js";
 import { normalizeEveAttributes } from "#runtime/attributes/normalize.js";
 import { ROOT_COMPILED_AGENT_NODE_ID } from "#compiler/manifest.js";
 import { ConnectionAuthorizationRequiredError } from "#public/connections/errors.js";
-import type { HandleMessageStreamEvent } from "#protocol/message.js";
+import type { UnstampedMessageStreamEvent, MessageStreamEvent } from "#protocol/message.js";
+import { isEventId } from "#protocol/event-id.js";
 import type { ToolContext } from "#public/definitions/tool.js";
 import type { AuthorizationDefinition, TokenResult } from "#runtime/connections/types.js";
 import type { ResolvedToolDefinition } from "#runtime/types.js";
@@ -290,6 +291,64 @@ describe("workflowEntry integration", () => {
         ).toBe(true);
       } finally {
         stream.dispose();
+        await run.cancel();
+      }
+    });
+  });
+
+  it("stamps every stream event with an id that survives a rewind", async () => {
+    const runtime = createTestRuntime({ agent: { name: "workflow-entry-event-ids" } });
+    const continuationToken = "http:workflow-entry-event-ids";
+
+    await runtime.run(async () => {
+      const run = await start(workflowEntry, [
+        {
+          input: { message: "identify these events" },
+          serializedContext: buildSerializedContext({
+            channelKind: "http",
+            continuationToken,
+            mode: "conversation",
+          }),
+        },
+      ]);
+
+      const stream = captureTurnEvents(run);
+      let firstTurn: readonly MessageStreamEvent[];
+      try {
+        firstTurn = await stream.nextTurn();
+      } finally {
+        stream.dispose();
+      }
+
+      try {
+        expect(firstTurn.length).toBeGreaterThan(1);
+        // No two events share an id, including appends that share
+        // `(turnId, sequence, stepIndex)`.
+        expect(firstTurn.every((event) => isEventId(event.meta.id))).toBe(true);
+        expect(new Set(firstTurn.map((event) => event.meta.id)).size).toBe(firstTurn.length);
+
+        const ids = firstTurn.map((event) => event.meta.id);
+        expect(ids).toEqual([...ids].sort());
+
+        // Re-reading the durable stream returns the same ids.
+        const workflowRuntime = createWorkflowRuntime({
+          compiledArtifactsSource: createBundledRuntimeCompiledArtifactsSource(),
+        });
+        const replayed = await workflowRuntime.getEventStream(run.runId, { startIndex: 0 });
+        const replayedIds: string[] = [];
+        const reader = replayed.getReader();
+        try {
+          while (replayedIds.length < firstTurn.length) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            replayedIds.push(value.meta.id);
+          }
+        } finally {
+          await reader.cancel();
+        }
+
+        expect(replayedIds).toEqual(ids);
+      } finally {
         await run.cancel();
       }
     });
@@ -586,8 +645,8 @@ interface CapturedEventStream {
   dispose(): void;
   nextUntil(
     label: string,
-    predicate: (event: HandleMessageStreamEvent) => boolean,
-  ): Promise<HandleMessageStreamEvent[]>;
+    predicate: (event: UnstampedMessageStreamEvent) => boolean,
+  ): Promise<UnstampedMessageStreamEvent[]>;
 }
 
 function captureEvents(run: Parameters<typeof captureTurnEvents>[0]): CapturedEventStream {
@@ -618,9 +677,9 @@ async function readUntil(
   reader: ReadableStreamDefaultReader<Uint8Array>,
   decoder: InstanceType<typeof TextDecoder>,
   initialBuffer: string,
-  predicate: (event: HandleMessageStreamEvent) => boolean,
-): Promise<{ buffer: string; events: HandleMessageStreamEvent[] }> {
-  const events: HandleMessageStreamEvent[] = [];
+  predicate: (event: UnstampedMessageStreamEvent) => boolean,
+): Promise<{ buffer: string; events: UnstampedMessageStreamEvent[] }> {
+  const events: UnstampedMessageStreamEvent[] = [];
   let buffer = initialBuffer;
 
   while (true) {
@@ -644,7 +703,7 @@ async function readUntil(
         continue;
       }
 
-      const event = JSON.parse(line) as HandleMessageStreamEvent;
+      const event = JSON.parse(line) as UnstampedMessageStreamEvent;
       events.push(event);
 
       if (predicate(event)) {
