@@ -155,6 +155,17 @@ ai.eve.turn  {eve.session.id}
 
 eve creates the `ai.eve.turn` parent span per turn and passes enriched telemetry to the AI SDK so model calls and tool executions are traced automatically. Session, turn, step, and channel context is injected as the framework half of the runtime context (`eve.version`, `eve.session.id`, `eve.environment`, `eve.turn.id`, `eve.turn.sequence`, `eve.step.index`, `eve.channel.kind`) and rides onto the spans alongside any values your `events["step.started"]` callback returns under `runtimeContext`.
 
+Set `traceChannelRequests: true` on `defineInstrumentation` to also wrap each inbound channel HTTP request in a single OpenTelemetry `SERVER` span named for the registered route, which parents the turn tree above (and any `hook.resume` and outgoing HTTP spans):
+
+```text
+POST /eve/v1/session/:sessionId
+  └── hook.resume
+        ├── GET hooks/by-token
+        └── POST hook_received
+```
+
+The span stays low-cardinality (route template in `http.route`, method in `http.request.method`, never the concrete URL) and records no session ids, tokens, headers, bodies, or query parameters. It adopts an incoming `traceparent` as its parent when present, so eve requests correlate with upstream traces. It defaults to `false`; enable it only when you want these request spans.
+
 ## Workflow run tags
 
 Separately from OpenTelemetry, eve tags every workflow run with reserved `$eve.*` attributes. These live on the Vercel Workflow run, queryable in the Workflow dashboard, not on OTel spans, and you do not configure them: they are framework-owned and emitted automatically on every session, turn, and subagent run, whether or not an `instrumentation.ts` file is present. Authored code cannot set or override the `$eve.` namespace.
