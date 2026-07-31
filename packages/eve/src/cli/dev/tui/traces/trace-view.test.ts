@@ -4,7 +4,12 @@ import { stripAnsi, visibleLength } from "#cli/ui/terminal-text.js";
 import type { LocalTrace, LocalTraceSpan } from "#harness/local-trace-reader.js";
 
 import { createTheme } from "../theme.js";
-import { renderSpanDetail, renderTraceViewer } from "./trace-view.js";
+import {
+  conversationSelectionText,
+  panelSelectionText,
+  renderSpanDetail,
+  renderTraceViewer,
+} from "./trace-view.js";
 import type { TraceViewerState } from "./trace-viewer-state.js";
 import { applyLoadedTrace, applyTraceList, createTraceViewerState } from "./trace-viewer-state.js";
 
@@ -106,6 +111,87 @@ describe("renderTraceViewer", () => {
     // First card (system) is selected: white half-block bar on its rows.
     const selectedRows = frame.rows.filter((row) => row.includes("\x1b[97m▌"));
     expect(selectedRows.length).toBeGreaterThan(0);
+  });
+
+  it("shows the copy toast in the header's top-right corner", () => {
+    const state = viewerState(conversationSpans());
+    const frame = renderTraceViewer(state, {
+      width: 100,
+      height: 30,
+      theme: THEME,
+      toast: "Copied to clipboard",
+    });
+    expect(stripAnsi(frame.rows[0]!)).toContain("✓ Copied to clipboard");
+  });
+
+  it("paints an active drag selection in reverse video", () => {
+    const state = viewerState(conversationSpans(), {
+      textSelection: {
+        anchor: { line: 1, column: 2 },
+        head: { line: 2, column: 10 },
+        dragging: true,
+        region: "conversation" as const,
+      },
+    });
+    const frame = render(state);
+    const highlighted = frame.rows.filter((row) => row.includes("\x1b[7m"));
+    expect(highlighted.length).toBe(2);
+  });
+
+  it("extracts the dragged text from the rendered conversation", () => {
+    const state = viewerState(conversationSpans());
+    // The system card's title row is line 1 ("  ▸ system" once rendered).
+    const selection = {
+      anchor: { line: 1, column: 0 },
+      head: { line: 1, column: 40 },
+      dragging: true,
+      region: "conversation" as const,
+    };
+    const text = conversationSelectionText(state, 100, THEME, selection);
+    expect(text).toContain("system");
+    expect(text).not.toContain("\x1b");
+    // A multi-line drag keeps line structure.
+    const multi = conversationSelectionText(state, 100, THEME, {
+      anchor: { line: 1, column: 0 },
+      head: { line: 5, column: 99 },
+      dragging: true,
+      region: "conversation" as const,
+    });
+    expect(multi.split("\n").length).toBe(5);
+  });
+
+  it("paints a drawer drag selection on the panel, not the cards", () => {
+    const state = viewerState(conversationSpans(), {
+      panelOpen: true,
+      textSelection: {
+        anchor: { line: 1, column: 0 },
+        head: { line: 3, column: 10 },
+        dragging: true,
+        region: "panel" as const,
+      },
+    });
+    const frame = render(state);
+    const highlighted = frame.rows.filter((row) => row.includes("\x1b[7m"));
+    expect(highlighted.length).toBe(3);
+    // The highlight sits in the drawer area (right of the conversation).
+    for (const row of highlighted) {
+      const before = row.slice(0, row.indexOf("\x1b[7m"));
+      expect(visibleLength(before)).toBeGreaterThanOrEqual(frame.contentWidth);
+    }
+  });
+
+  it("extracts the dragged text from the details drawer", () => {
+    const state = viewerState(conversationSpans(), { panelOpen: true });
+    // Detail line 1 is the selected span's name (line 0 is top padding).
+    const text = panelSelectionText(state, 100, THEME, {
+      anchor: { line: 1, column: 0 },
+      head: { line: 2, column: 40 },
+      dragging: true,
+      region: "panel" as const,
+    });
+    expect(text).toContain("ai.streamText.doStream");
+    expect(text).not.toContain("\x1b");
+    expect(text.split("\n").length).toBe(2);
   });
 
   it("marks error cards and shows the error status in the detail panel", () => {

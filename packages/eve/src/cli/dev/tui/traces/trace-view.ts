@@ -9,6 +9,8 @@
 import { formatElapsed } from "#cli/format-elapsed.js";
 import {
   clipVisible,
+  sliceVisible,
+  stripAnsi,
   stripTerminalControls,
   visibleLength,
   wrapVisibleLine,
@@ -19,8 +21,8 @@ import { describeLocalTraceSpan } from "#harness/local-trace-reader.js";
 import type { Theme } from "../theme.js";
 import { formatAttributeContent } from "./trace-content.js";
 import { renderConversationItem } from "./trace-conversation.js";
-import type { TraceViewerState } from "./trace-viewer-state.js";
-import { selectedTraceViewerSpan } from "./trace-viewer-state.js";
+import type { TextSelectionRange, TraceViewerState } from "./trace-viewer-state.js";
+import { orderedTextSelection, selectedTraceViewerSpan } from "./trace-viewer-state.js";
 
 const HEADER_ROWS = 1;
 const FOOTER_ROWS = 2;
@@ -49,6 +51,8 @@ export interface RenderTraceViewerOptions {
   readonly activeWindowEndNs?: bigint;
   /** Tracing is disabled via `EVE_TRACES=off` (empty-state copy). */
   readonly tracingDisabled?: boolean;
+  /** Transient confirmation shown in the header's top-right corner. */
+  readonly toast?: string;
 }
 
 export function renderTraceViewer(
@@ -60,19 +64,7 @@ export function renderTraceViewer(
   const panelWidth = state.panelOpen ? panelWidthFor(width) : 0;
   const timelineWidth = Math.max(20, width - (panelWidth === 0 ? 0 : panelWidth + 1));
 
-  const selected = selectedTraceViewerSpan(state);
-  // A panel that doesn't fit (very narrow terminal) isn't modeled as open —
-  // otherwise key handling would scroll content nobody can see. The drawer
-  // gets one row of top padding and one column of side padding.
-  const detailLines =
-    state.panelOpen && panelWidth > 0 && selected !== undefined
-      ? [
-          "",
-          ...renderSpanDetail(selected, Math.max(16, panelWidth - 3), theme, {
-            excludeKeys: CONVERSATION_CONTENT_KEYS,
-          }).map((line) => ` ${line}`),
-        ]
-      : [];
+  const detailLines = panelDetailLines(state, panelWidth, theme);
   const panelViewportRows = bodyRows;
 
   const rows: string[] = [];
@@ -91,7 +83,15 @@ export function renderTraceViewer(
       }
       // No divider: the base canvas separates the cards and drawer by itself.
       const separator = " ";
-      const panelLine = detailLines[state.panelScroll + index] ?? "";
+      let panelLine = detailLines[state.panelScroll + index] ?? "";
+      if (state.textSelection !== undefined && state.textSelection.region === "panel") {
+        panelLine = highlightSelection(
+          panelLine,
+          state.panelScroll + index,
+          state.textSelection,
+          panelWidth,
+        );
+      }
       rows.push(joinPanels(left, timelineWidth, separator, panelLine, width));
     }
   }
@@ -219,7 +219,11 @@ function renderHeader(state: TraceViewerState, options: RenderTraceViewerOptions
   const position =
     state.traces.length === 0 ? "" : colors.dim(`[${state.traceIndex + 1}/${state.traces.length}]`);
   const live = options.activeWindowEndNs !== undefined ? colors.green("● live") : "";
-  const right = [live, position].filter((part) => part.length > 0).join(" ");
+  const toast =
+    options.toast === undefined
+      ? ""
+      : colors.green(`${theme.unicode ? "✓ " : ""}${stripTerminalControls(options.toast)}`);
+  const right = [toast, live, position].filter((part) => part.length > 0).join(" ");
   // The badge keeps its room: the title (full session id and all) clips first.
   const header = joinRight(
     clipVisible(title, Math.max(0, width - visibleLength(right) - 1)),
@@ -246,6 +250,17 @@ function renderConversation(
   }
   // Render all cards, then apply the line-level scroll offset so expanded
   // cards taller than the viewport can be scrolled through to the end.
+  const allLines = conversationLines(state, width, theme);
+  const visible = allLines.slice(state.scrollRow, state.scrollRow + bodyRows);
+  if (state.textSelection === undefined || state.textSelection.region !== "conversation") {
+    return visible;
+  }
+  return visible.map((line, index) =>
+    highlightSelection(line, state.scrollRow + index, state.textSelection!, width),
+  );
+}
+
+function conversationLines(state: TraceViewerState, width: number, theme: Theme): string[] {
   const allLines: string[] = [];
   for (let index = 0; index < state.conversationItems.length; index += 1) {
     allLines.push(
@@ -259,7 +274,98 @@ function renderConversation(
       "",
     );
   }
-  return allLines.slice(state.scrollRow, state.scrollRow + bodyRows);
+  return allLines;
+}
+
+/**
+ * The drawer's display lines for the selected span: one row of top padding
+ * and one column of side padding around the span detail. A panel that
+ * doesn't fit (very narrow terminal) isn't modeled as open — otherwise key
+ * handling would scroll content nobody can see.
+ */
+function panelDetailLines(state: TraceViewerState, panelWidth: number, theme: Theme): string[] {
+  const selected = selectedTraceViewerSpan(state);
+  if (!state.panelOpen || panelWidth <= 0 || selected === undefined) return [];
+  return [
+    "",
+    ...renderSpanDetail(selected, Math.max(16, panelWidth - 3), theme, {
+      excludeKeys: CONVERSATION_CONTENT_KEYS,
+    }).map((line) => ` ${line}`),
+  ];
+}
+
+/**
+ * Plain text covered by a drag selection over the conversation, extracted
+ * from the same rendered lines the user saw.
+ */
+export function conversationSelectionText(
+  state: TraceViewerState,
+  width: number,
+  theme: Theme,
+  selection: TextSelectionRange,
+): string {
+  return selectionText(conversationLines(state, width, theme), selection);
+}
+
+/**
+ * Plain text covered by a drag selection over the details drawer, extracted
+ * from the same detail lines the frame painted. `totalWidth` is the full
+ * terminal width — the drawer's width derives from it exactly as rendering
+ * does, so columns map to the same cells the user selected.
+ */
+export function panelSelectionText(
+  state: TraceViewerState,
+  totalWidth: number,
+  theme: Theme,
+  selection: TextSelectionRange,
+): string {
+  const panelWidth = state.panelOpen ? panelWidthFor(totalWidth) : 0;
+  return selectionText(panelDetailLines(state, panelWidth, theme), selection);
+}
+
+/**
+ * Slices the selected cells out of rendered lines: partial first/last lines
+ * honor the columns, middle lines contribute in full, and each line loses
+ * its trailing padding.
+ */
+function selectionText(lines: readonly string[], selection: TextSelectionRange): string {
+  const { start, end } = orderedTextSelection(selection);
+  const parts: string[] = [];
+  for (let line = Math.max(0, start.line); line <= end.line && line < lines.length; line += 1) {
+    const text = stripAnsi(lines[line]!);
+    const from = line === start.line ? start.column : 0;
+    const to = line === end.line ? end.column + 1 : Number.POSITIVE_INFINITY;
+    const head = to === Number.POSITIVE_INFINITY ? text : sliceVisible(text, to);
+    const prefixLength = sliceVisible(text, from).length;
+    parts.push(head.slice(prefixLength).trimEnd());
+  }
+  return parts.join("\n");
+}
+
+/** Paints the selected cells of one visible row in reverse video. */
+function highlightSelection(
+  row: string,
+  line: number,
+  selection: TextSelectionRange,
+  width: number,
+): string {
+  const { start, end } = orderedTextSelection(selection);
+  if (line < start.line || line > end.line) return row;
+  const from = line === start.line ? start.column : 0;
+  const to = line === end.line ? end.column + 1 : width;
+  // Selection can extend past a row's painted cells; pad so the highlight
+  // shows the full extent the copy will cover.
+  const rowWidth = visibleLength(row);
+  const padded = rowWidth < to ? row + " ".repeat(to - rowWidth) : row;
+  const prefix = sliceVisible(padded, from);
+  const withSelection = sliceVisible(padded, to);
+  const middle = withSelection.slice(prefix.length);
+  const suffix = padded.slice(withSelection.length);
+  if (middle.length === 0) return row;
+  // Re-assert reverse video after any embedded reset so a card's internal
+  // style changes cannot end the highlight early.
+  const inverted = middle.replaceAll("\x1b[0m", "\x1b[0m\x1b[7m");
+  return `${prefix}\x1b[7m${inverted}\x1b[27m${suffix}`;
 }
 
 function renderFooter(state: TraceViewerState, width: number, theme: Theme): string[] {
