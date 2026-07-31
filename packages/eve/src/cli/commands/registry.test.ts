@@ -7,6 +7,7 @@ import {
   runRegistryAddCommand,
   runRegistryListCommand,
   runRegistrySearchCommand,
+  resolveOfficialRegistryUrl,
   runRegistryViewCommand,
   type RegistryCommandLogger,
 } from "./registry.js";
@@ -55,6 +56,7 @@ function createLogger(): RegistryCommandLogger & { errors: string[]; logs: strin
 
 describe("registry commands", () => {
   beforeEach(() => {
+    delete process.env.EVE_DEV_OFFICIAL_REGISTRY_URL;
     vi.clearAllMocks();
     vi.stubGlobal(
       "fetch",
@@ -70,8 +72,23 @@ describe("registry commands", () => {
   });
 
   afterEach(() => {
+    delete process.env.EVE_DEV_OFFICIAL_REGISTRY_URL;
     process.exitCode = undefined;
     vi.unstubAllGlobals();
+  });
+
+  it("normalizes the explicit development official-registry override", () => {
+    expect(resolveOfficialRegistryUrl("http://localhost:4173/r/")).toBe("http://localhost:4173/r");
+  });
+
+  it.each([
+    ["invalid URL", "not a URL"],
+    ["unsupported protocol", "file:///tmp/registry"],
+    ["credentials", "https://user:password@example.com/r"],
+    ["query", "https://example.com/r?token=secret"],
+    ["fragment", "https://example.com/r#preview"],
+  ])("rejects a development official-registry override with %s", (_reason, value) => {
+    expect(() => resolveOfficialRegistryUrl(value)).toThrow(/EVE_DEV_OFFICIAL_REGISTRY_URL/);
   });
 
   it("installs official items through the registry SDK", async () => {
