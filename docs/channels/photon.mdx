@@ -1,0 +1,43 @@
+---
+title: Photon
+description: Connect an eve agent to iMessage through Photon.
+---
+
+Use `photonIMessageChannel` to receive and reply to iMessages through a Photon project.
+With Vercel Connect, the channel resolves credentials lazily when the adapter
+first initializes:
+
+```ts title="agent/channels/photon.ts"
+import { connectPhotonCredentials } from "@vercel/connect/eve";
+import { photonIMessageChannel } from "eve/channels/photon";
+
+export default photonIMessageChannel({
+  credentials: connectPhotonCredentials("photon/my-agent"),
+});
+```
+
+The default webhook route is `/eve/v1/photon`. The channel verifies forwarded
+webhooks with same-project Vercel OIDC by default, marks accepted messages as
+read, and continues the same eve session for every message in an iMessage
+conversation. A new accepted message cooperatively cancels an active turn and
+steers its replacement turn.
+
+Customize inbound dispatch with `onMessage`. Return `null` to ignore a message:
+
+```ts
+export default photonIMessageChannel({
+  credentials: connectPhotonCredentials("photon/my-agent"),
+  onMessage(_ctx, message) {
+    if (message.author.isBot) return null;
+    return {
+      auth: null,
+      context: [`The sender is ${message.author.fullName}.`],
+    };
+  },
+});
+```
+
+Set `route` to override the webhook path or `webhookVerifier` to use a different
+trusted-forwarder verifier. For direct Photon webhooks, pass `webhookSecret` or
+set `IMESSAGE_WEBHOOK_SECRET`; the signing secret takes precedence over the
+default OIDC verifier.
