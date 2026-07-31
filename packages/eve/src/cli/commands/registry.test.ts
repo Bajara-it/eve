@@ -429,7 +429,7 @@ describe("registry commands", () => {
     expect(logger.logs).toContain("Added @other to package.json.");
   });
 
-  it("uses the Photon iMessage title for the official provider", async () => {
+  it("loads real item titles in parallel for a page of search results", async () => {
     searchRegistries.mockResolvedValue({
       items: [
         {
@@ -437,15 +437,39 @@ describe("registry commands", () => {
           name: "channel/photon-imessage",
           addCommandArgument: "https://eve.dev/r/channel/photon-imessage.json",
         },
+        {
+          registry: "@acme",
+          name: "extension/ai-sdk-tools",
+          addCommandArgument: "@acme/ai-sdk-tools",
+        },
       ],
-      pagination: { total: 1, offset: 0, limit: 1, hasMore: false },
+      pagination: { total: 2, offset: 0, limit: 2, hasMore: false },
     });
+    const resolvers = new Map<string, (value: unknown[]) => void>();
+    getRegistryItems.mockImplementation(
+      ([address]: string[]) =>
+        new Promise((resolve) => {
+          resolvers.set(address!, resolve);
+        }),
+    );
 
-    await expect(browseRegistryCatalog("/project")).resolves.toMatchObject({
+    const catalog = browseRegistryCatalog("/project", { query: "sdk" });
+
+    await vi.waitFor(() => expect(getRegistryItems).toHaveBeenCalledTimes(2));
+    resolvers.get("https://eve.dev/r/channel/photon-imessage.json")?.([
+      { title: "Photon iMessage" },
+    ]);
+    resolvers.get("@acme/ai-sdk-tools")?.([{ title: "AI SDK Tools" }]);
+    await expect(catalog).resolves.toMatchObject({
       items: [
-        expect.objectContaining({ name: "channel/photon-imessage", title: "Photon iMessage" }),
+        { name: "channel/photon-imessage", title: "Photon iMessage" },
+        { name: "extension/ai-sdk-tools", title: "AI SDK Tools" },
       ],
     });
+    expect(searchRegistries).toHaveBeenCalledWith(
+      ["https://eve.dev/r/registry.json", "@acme"],
+      expect.objectContaining({ limit: 100, query: "sdk" }),
+    );
   });
 
   it("lists the official registry without configured namespaces", async () => {
@@ -461,6 +485,7 @@ describe("registry commands", () => {
     expect(searchRegistries).toHaveBeenCalledWith(["https://eve.dev/r/registry.json"], {
       config: { registries: {} },
       continueOnError: false,
+      limit: 100,
       query: undefined,
     });
     expect(logger.logs).toEqual(["No registry items found."]);
@@ -516,6 +541,7 @@ describe("registry commands", () => {
         registries: { "@acme": "https://example.com/r/{name}.json" },
       },
       continueOnError: true,
+      limit: 100,
       query: "browser",
     });
     expect(logger.logs).toEqual([
