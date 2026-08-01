@@ -13,9 +13,9 @@ import {
   getAllFrameworkChannelNames,
   getFrameworkChannelDefinitions,
 } from "#runtime/framework-channels/index.js";
-import { createConnectionSearchResolver } from "#runtime/framework-tools/connection-search-dynamic.js";
 import {
   getAllFrameworkToolNames,
+  getFrameworkDynamicToolResolvers,
   getFrameworkToolDefinitions,
 } from "#runtime/framework-tools/index.js";
 import { type ResolvedAgentGraphBundle, ROOT_RUNTIME_AGENT_NODE_ID } from "#runtime/graph.js";
@@ -136,10 +136,8 @@ async function resolveRuntimeAgentNode(
     moduleMap: input.moduleMap,
     nodeId: input.nodeId,
   });
-  const hasConnections = agent.connections.length > 0;
   const frameworkTools = getFrameworkToolDefinitions({
     authoredSkills: agent.skills,
-    hasConnections,
   });
   const frameworkToolNames = new Set(frameworkTools.map((t) => t.name));
   const allFrameworkToolNames = getAllFrameworkToolNames();
@@ -230,12 +228,10 @@ async function resolveRuntimeAgentNode(
       subagentNodesById: input.subagentNodesById,
     }),
   });
-  const resolvedAgent = hasConnections
-    ? {
-        ...agent,
-        dynamicToolResolvers: [...agent.dynamicToolResolvers, createConnectionSearchResolver()],
-      }
-    : agent;
+  const resolvedAgent = {
+    ...agent,
+    dynamicToolResolvers: [...agent.dynamicToolResolvers, ...getFrameworkDynamicToolResolvers()],
+  };
 
   const node: ResolvedAgentGraphBundle["root"] = {
     agent: resolvedAgent,
