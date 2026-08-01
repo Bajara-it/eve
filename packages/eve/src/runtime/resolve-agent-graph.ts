@@ -21,6 +21,7 @@ import {
 import { type ResolvedAgentGraphBundle, ROOT_RUNTIME_AGENT_NODE_ID } from "#runtime/graph.js";
 import { createRuntimeHookRegistry } from "#runtime/hooks/registry.js";
 import { resolveAgent } from "#runtime/resolve-agent.js";
+import { resolveDynamicSubagentDefinition } from "#runtime/resolve-dynamic-subagent.js";
 import { loadResolvedModuleExport } from "#runtime/resolve-helpers.js";
 import { createRuntimeSandboxRegistry } from "#runtime/sandbox/registry.js";
 import { LOAD_SKILL_TOOL_NAME } from "#runtime/skills/fragment-context.js";
@@ -29,6 +30,7 @@ import { createRuntimeToolRegistry } from "#runtime/tools/registry.js";
 import { WORKFLOW_TOOL_NAME } from "#shared/workflow-sandbox.js";
 import type {
   ResolvedChannelDefinition,
+  ResolvedDynamicSubagentDefinition,
   ResolvedRuntimeDelegationNode,
   ResolvedRuntimeRemoteAgentNode,
   ResolvedRuntimeSubagentNode,
@@ -311,8 +313,33 @@ async function resolveRuntimeSubagent(input: {
   readonly sourceRef: CompiledSubagentNode;
   readonly subagentNodesById: ReadonlyMap<string, CompiledSubagentNode>;
 }): Promise<ResolvedRuntimeSubagentNode> {
+  const dynamicSource = input.sourceRef.agent.config.source;
+  if (input.sourceRef.dynamic !== undefined && dynamicSource === undefined) {
+    throw new ResolveRuntimeAgentGraphError(
+      `Dynamic subagent "${input.sourceRef.logicalPath}" is missing its agent config source.`,
+      {
+        nodeId: toRuntimeNodeId(input.sourceRef.nodeId),
+        sourceId: input.sourceRef.sourceId,
+      },
+    );
+  }
+  const variant:
+    | { readonly description: string; readonly dynamic?: never }
+    | { readonly description?: never; readonly dynamic: ResolvedDynamicSubagentDefinition } =
+    input.sourceRef.dynamic === undefined
+      ? { description: input.sourceRef.description }
+      : {
+          dynamic: await resolveDynamicSubagentDefinition({
+            definition: {
+              ...dynamicSource!,
+              ...input.sourceRef.dynamic,
+            },
+            moduleMap: input.moduleMap,
+            nodeId: input.sourceRef.nodeId,
+          }),
+        };
   const resolvedSubagent: ResolvedRuntimeSubagentNode = {
-    description: input.sourceRef.description,
+    ...variant,
     kind: "subagent",
     logicalPath: input.sourceRef.logicalPath,
     name: input.sourceRef.name,
