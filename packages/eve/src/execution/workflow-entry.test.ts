@@ -519,6 +519,7 @@ describe("workflowEntry", () => {
         callId: "call-1",
         isError: true,
         kind: "subagent-result",
+        origin: "child",
         output: {
           code: "SUBAGENT_EXECUTION_FAILED",
           message: "persistent recoverable failure",

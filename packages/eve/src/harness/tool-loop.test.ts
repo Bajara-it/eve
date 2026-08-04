@@ -43,8 +43,9 @@ import {
   setPendingInputBatch,
 } from "#harness/input-requests.js";
 import { getPendingRuntimeActionBatch } from "#harness/runtime-actions.js";
+import { AGENT_HANDLES_STATE_KEY } from "#harness/handles/store.js";
 import { stashToolInterrupt } from "#harness/tool-interrupts.js";
-import { createToolLoopHarness } from "#harness/tool-loop.js";
+import { appendMissingToolResultMessages, createToolLoopHarness } from "#harness/tool-loop.js";
 import { isSessionLimitDecline, TurnCancelledError } from "#harness/turn-cancellation.js";
 import {
   getSessionTokenLimitViolation,
@@ -688,6 +689,118 @@ describe("createToolLoopHarness", () => {
     expect(agentCall).toBeDefined();
     expect(agentCall!.tools).toHaveProperty("add");
     expect(agentCall!.tools).not.toHaveProperty("Workflow");
+  });
+
+  it("announces current agents outside the cacheable system prompt", async () => {
+    setupMockAgent({
+      finishReason: "stop",
+      response: { messages: [{ content: "Hello!", role: "assistant" }] },
+      text: "Hello!",
+      toolCalls: [],
+      toolResults: [],
+    });
+
+    const runStep = createToolLoopHarness(
+      createTestConfig("conversation", undefined, {
+        persistentSubagentSessions: true,
+        resolveModel: vi.fn().mockResolvedValue(
+          new MockLanguageModelV3({
+            modelId: "claude-sonnet-4-5",
+            provider: "anthropic.messages",
+          }),
+        ),
+      }),
+    );
+    const session = createTestSession({
+      state: {
+        [AGENT_HANDLES_STATE_KEY]: {
+          handles: [
+            {
+              address: {
+                continuationToken: "private-token",
+                kind: "agent/local",
+                sessionId: "child-session-123456789012",
+              },
+              identity: {
+                id: "ag_research:123456789012",
+                name: "research",
+                nodeId: "subagents/research",
+              },
+              lastStatus: "waiting",
+              phase: "parked",
+            },
+          ],
+        },
+      },
+    });
+
+    const result = await runStep(session, { message: "Hi" });
+
+    const { instructions } = vi.mocked(ToolLoopAgent).mock.calls[0]![0];
+    const agent = vi.mocked(ToolLoopAgent).mock.results[0]?.value as {
+      generate: ReturnType<typeof vi.fn>;
+    };
+    const messages = agent.generate.mock.calls[0]?.[0].messages as ModelMessage[];
+    expect(instructions).toBe("You are a test assistant.");
+    expect(messages).toContainEqual({
+      content: expect.stringContaining(
+        '<agent id="ag_research:123456789012" name="research">waiting</agent>',
+      ),
+      role: "assistant",
+    });
+    expect(messages.at(-1)).toEqual({ content: "Hi", role: "user" });
+    expect(JSON.stringify({ instructions, messages })).not.toContain("private-token");
+    expect(result.session.history).toContainEqual({
+      content: expect.stringContaining('<agent id="ag_research:123456789012"'),
+      role: "assistant",
+    });
+  });
+
+  it("skips the agents snippet when no handle is parked", async () => {
+    setupMockAgent({
+      finishReason: "stop",
+      response: { messages: [{ content: "Hello!", role: "assistant" }] },
+      text: "Hello!",
+      toolCalls: [],
+      toolResults: [],
+    });
+
+    const runStep = createToolLoopHarness(
+      createTestConfig("conversation", undefined, { persistentSubagentSessions: true }),
+    );
+    const session = createTestSession({
+      state: {
+        [AGENT_HANDLES_STATE_KEY]: {
+          handles: [
+            {
+              identity: {
+                id: "ag_research:123456789012",
+                name: "research",
+                nodeId: "subagents/research",
+              },
+              operation: {
+                callId: "call-1",
+                id: "op-1",
+                kind: "start",
+                parentTurnId: "turn-1",
+              },
+              phase: "starting",
+              target: { continuationToken: "private-token", kind: "agent/local" },
+            },
+          ],
+        },
+      },
+    });
+
+    await runStep(session, { message: "Hi" });
+
+    const call = vi.mocked(ToolLoopAgent).mock.calls[0]?.[0];
+    const agent = vi.mocked(ToolLoopAgent).mock.results[0]?.value as {
+      generate: ReturnType<typeof vi.fn>;
+    };
+    const messages = agent.generate.mock.calls[0]?.[0].messages as ModelMessage[];
+    expect(JSON.stringify(call?.instructions ?? "")).not.toContain("<agents>");
+    expect(JSON.stringify(messages)).not.toContain("<agents>");
   });
 
   it("uses dynamic model selection for the model call", async () => {
@@ -10101,5 +10214,81 @@ describe("createToolLoopHarness", () => {
       ).toBe(false);
       errorSpy.mockRestore();
     });
+  });
+});
+
+describe("appendMissingToolResultMessages", () => {
+  const searchResult = {
+    type: "tool-result" as const,
+    toolCallId: "toolu_1",
+    toolName: "web_search",
+    output: { type: "json" as const, value: { winner: "OKC" } },
+  };
+
+  it("skips synthesized results for provider-executed calls already answered inline", () => {
+    // Provider-executed results live inside the *assistant* message until
+    // provider history normalization; a second result for the same id makes
+    // Anthropic reject the whole history on the next call.
+    const assistantWithInlineResult = {
+      role: "assistant" as const,
+      content: [
+        {
+          type: "tool-call" as const,
+          toolCallId: "toolu_1",
+          toolName: "web_search",
+          input: { query: "2025 NBA Finals" },
+          providerExecuted: true,
+        },
+        { ...searchResult, providerExecuted: true },
+      ],
+    };
+
+    const messages = appendMissingToolResultMessages({
+      append: [
+        {
+          type: "tool-result",
+          toolCallId: "toolu_1",
+          toolName: "web_search",
+          output: { type: "error-text", value: "Failed to parse tool-call arguments" },
+        },
+      ],
+      responseMessages: [assistantWithInlineResult],
+    });
+
+    expect(messages).toEqual([assistantWithInlineResult]);
+  });
+
+  it("still backfills calls with no result anywhere", () => {
+    const assistant = {
+      role: "assistant" as const,
+      content: [
+        {
+          type: "tool-call" as const,
+          toolCallId: "toolu_2",
+          toolName: "web_search",
+          input: {},
+        },
+      ],
+    };
+    const backfill = {
+      type: "tool-result" as const,
+      toolCallId: "toolu_2",
+      toolName: "web_search",
+      output: { type: "error-text" as const, value: "invalid input" },
+    };
+
+    expect(
+      appendMissingToolResultMessages({ append: [backfill], responseMessages: [assistant] }),
+    ).toEqual([assistant, { role: "tool", content: [backfill] }]);
+  });
+
+  it("dedupes against results already in tool messages", () => {
+    const toolMessage = { role: "tool" as const, content: [searchResult] };
+    expect(
+      appendMissingToolResultMessages({
+        append: [searchResult],
+        responseMessages: [toolMessage],
+      }),
+    ).toEqual([toolMessage]);
   });
 });

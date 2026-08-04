@@ -1,3 +1,4 @@
+import { z } from "#compiled/zod/index.js";
 import { EVE_SESSION_ID_HEADER } from "#protocol/message.js";
 import { CancelTurnResponseSchema } from "#protocol/cancel-turn.js";
 import { createEveCallbackRoutePath, createEveCancelTurnRoutePath } from "#protocol/routes.js";
@@ -15,6 +16,19 @@ import type { RuntimeSubagentRegistry } from "#runtime/subagents/registry.js";
 import type { DynamicRemoteAgentConfig } from "#runtime/subagents/dynamic-remote-agent-config.js";
 import type { ResolvedRuntimeRemoteAgentNode } from "#runtime/types.js";
 import { expectFunction, expectObjectRecord } from "#internal/authored-module.js";
+
+const CreateSessionResponseSchema = z.object({
+  // Older eve deployments do not return a continuationToken. Their children
+  // still run to completion as task-mode one-shots; they just can never be
+  // continued, so the handle records no token.
+  continuationToken: z.string().min(1).optional(),
+  sessionId: z.string().min(1).optional(),
+});
+
+type RemoteAgentSessionCoordinates = {
+  readonly continuationToken?: string;
+  readonly sessionId: string;
+};
 
 class RemoteAgentCancelRequestError extends Error {
   readonly retryable: boolean;
@@ -36,7 +50,7 @@ export async function startRemoteAgentSession(input: {
   readonly initiatorAuth?: SessionAuthContext | null;
   readonly remote: ResolvedRuntimeRemoteAgentNode;
   readonly session: HarnessSession;
-}): Promise<string> {
+}): Promise<RemoteAgentSessionCoordinates> {
   const callbackToken = input.callbackToken ?? input.session.continuationToken;
   if (!callbackToken) {
     throw new Error("Cannot dispatch remote agent without a parent continuation token.");
@@ -47,6 +61,7 @@ export async function startRemoteAgentSession(input: {
 
   const forwardedPrincipal = buildForwardedPrincipalField(input);
   const requestBody: {
+    capabilities: {};
     callback: {
       callId: string;
       subagentName: string;
@@ -55,9 +70,10 @@ export async function startRemoteAgentSession(input: {
     };
     forwardedPrincipal?: ForwardedPrincipal;
     message: string;
-    mode: "task";
+    mode: "conversation" | "task";
     outputSchema?: object;
   } = {
+    capabilities: {},
     callback: {
       callId: input.action.callId,
       subagentName: input.action.remoteAgentName,
@@ -68,6 +84,8 @@ export async function startRemoteAgentSession(input: {
       ),
     },
     message: formatRemoteAgentCallInputMessage({ action: input.action, remote: input.remote }),
+    // Remote children run one turn per delivery in task mode; follow-ups
+    // arrive as continuations against the child's agent handle.
     mode: "task",
     outputSchema:
       normalizeRequestedOutputSchema(input.action.input.outputSchema) ?? input.remote.outputSchema,
@@ -92,23 +110,33 @@ export async function startRemoteAgentSession(input: {
     );
   }
 
-  const sessionIdFromHeader = response.headers.get(EVE_SESSION_ID_HEADER);
-  if (sessionIdFromHeader !== null && sessionIdFromHeader.length > 0) {
-    return sessionIdFromHeader;
-  }
-
+  let body: unknown;
   try {
-    const body = (await response.json()) as { readonly sessionId?: unknown };
-    if (typeof body.sessionId === "string" && body.sessionId.length > 0) {
-      return body.sessionId;
-    }
+    body = await response.json();
   } catch {
-    // Fall through to the generic error below.
+    throw new Error(
+      `Remote agent "${input.action.remoteAgentName}" create-session response was not valid JSON.`,
+    );
   }
 
-  throw new Error(
-    `Remote agent "${input.action.remoteAgentName}" create-session response did not include a session id.`,
-  );
+  const parsed = CreateSessionResponseSchema.safeParse(body);
+  const sessionIdFromHeader = response.headers.get(EVE_SESSION_ID_HEADER);
+  const sessionId =
+    sessionIdFromHeader !== null && sessionIdFromHeader.length > 0
+      ? sessionIdFromHeader
+      : parsed.success
+        ? parsed.data.sessionId
+        : undefined;
+
+  if (!parsed.success || sessionId === undefined) {
+    throw new Error(
+      `Remote agent "${input.action.remoteAgentName}" create-session response did not include a sessionId.`,
+    );
+  }
+
+  return parsed.data.continuationToken === undefined
+    ? { sessionId }
+    : { continuationToken: parsed.data.continuationToken, sessionId };
 }
 
 function buildForwardedPrincipalField(input: {
@@ -175,12 +203,12 @@ export function isRetryableRemoteAgentCancelError(error: unknown): boolean {
   return !(error instanceof RemoteAgentCancelRequestError) || error.retryable;
 }
 
-export async function resolveRemoteAgentForAction(input: {
+export function resolveRemoteAgentForAction(input: {
   readonly dynamicRemoteAgent?: DynamicRemoteAgentConfig;
   readonly nodeId: string;
   readonly registry: RuntimeSubagentRegistry["subagentsByNodeId"];
   readonly remoteAgentName: string;
-}): Promise<ResolvedRuntimeRemoteAgentNode> {
+}): ResolvedRuntimeRemoteAgentNode {
   const registered = input.registry.get(input.nodeId);
   const definition = registered?.definition;
   if (input.dynamicRemoteAgent !== undefined) {

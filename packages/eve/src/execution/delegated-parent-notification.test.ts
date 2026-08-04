@@ -8,7 +8,7 @@ import { notifyDelegatedParentStep } from "#execution/delegated-parent-notificat
 import { SUBAGENT_ADAPTER } from "#execution/subagent-adapter.js";
 import { SUBAGENT_ADAPTER_KIND } from "#execution/subagent-adapter-state.js";
 import { resumeHook } from "#internal/workflow/runtime.js";
-import type { RuntimeSubagentResultActionResult } from "#runtime/actions/types.js";
+import type { RuntimeSubagentChildResult } from "#runtime/actions/types.js";
 
 vi.mock("../runtime/sessions/compiled-agent-cache.js", () => ({
   getCompiledRuntimeAgentBundle: vi.fn(),
@@ -22,10 +22,11 @@ const resumeHookMock = vi.mocked(resumeHook);
 
 const USAGE = { cacheReadTokens: 10, cacheWriteTokens: 5, inputTokens: 100, outputTokens: 50 };
 
-function createSuccessResult(): RuntimeSubagentResultActionResult {
+function createSuccessResult(): RuntimeSubagentChildResult {
   return {
     callId: "call-1",
     kind: "subagent-result",
+    origin: "child",
     output: "done",
     subagentName: "research",
   };
@@ -74,6 +75,7 @@ describe("notifyDelegatedParentStep", () => {
         {
           callId: "call-1",
           kind: "subagent-result",
+          origin: "child",
           output: "done",
           subagentName: "research",
           usage: USAGE,
@@ -95,10 +97,11 @@ describe("notifyDelegatedParentStep", () => {
   });
 
   it("never attaches usage to error results", async () => {
-    const errorResult: RuntimeSubagentResultActionResult = {
+    const errorResult: RuntimeSubagentChildResult = {
       callId: "call-1",
       isError: true,
       kind: "subagent-result",
+      origin: "child",
       output: { code: "SUBAGENT_EXECUTION_FAILED", message: "boom" },
       subagentName: "research",
     };
