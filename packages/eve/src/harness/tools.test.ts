@@ -9,6 +9,7 @@ import { always, never, once } from "#public/tools/approval/approval-helpers.js"
 import type { RuntimeModelReference } from "#runtime/agent/bootstrap.js";
 import {
   WEB_SEARCH_ANTHROPIC_OUTPUT_SCHEMA,
+  WEB_SEARCH_EXA_OUTPUT_SCHEMA,
   WEB_SEARCH_GOOGLE_OUTPUT_SCHEMA,
   WEB_SEARCH_OPENAI_OUTPUT_SCHEMA,
   WEB_SEARCH_PARALLEL_OUTPUT_SCHEMA,
@@ -397,6 +398,27 @@ describe("buildToolSet", () => {
       expect(getOutputJsonSchema(result.web_search)).toEqual(expectedOutputSchema);
     },
   );
+
+  it("injects Exa when configured for an AI Gateway model", async () => {
+    const tools: HarnessToolMap = new Map<string, HarnessToolDefinition>([
+      [
+        "web_search",
+        {
+          description: "Web search.",
+          inputSchema: jsonSchema({}),
+          name: "web_search",
+        },
+      ],
+    ]);
+
+    const result = await buildToolSetWithProviderTools({
+      modelReference: { id: "openai/gpt-5.4" },
+      tools,
+      webSearchProvider: "exa",
+    });
+
+    expect(getOutputJsonSchema(result.web_search)).toEqual(WEB_SEARCH_EXA_OUTPUT_SCHEMA);
+  });
 
   it("omits provider-managed web_search when no provider backend is available", async () => {
     const tools: HarnessToolMap = new Map<string, HarnessToolDefinition>([
