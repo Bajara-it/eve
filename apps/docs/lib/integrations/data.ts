@@ -41,13 +41,17 @@ export interface ApiKeySpec {
  * Structured description of a connection consumed by the detail page to
  * generate Install, Quick start, and Configure content. Transport (`mcp`,
  * `openapi`) and `description` are filled from the shared catalog identity;
- * `authModes`, `connector`, and `configureNote` are the docs-only overlay.
+ * Auth modes, connectors, and configure notes are the docs-only overlay.
  */
 export interface ConnectionSpec {
   /** Vercel Connect connector UID; defaults to the integration slug. */
   connector?: string;
+  /** Auth-mode-specific connector UIDs when one service needs separate connectors. */
+  connectors?: Partial<Record<AuthMode, string>>;
   /** Service passed to `vercel connect create` when it differs from the connector UID. */
   connectorService?: string;
+  /** Auth-mode-specific services passed to `vercel connect create`. */
+  connectorServices?: Partial<Record<AuthMode, string>>;
   /** Supported auth modes in display order; the first is the default. */
   authModes: AuthMode[];
   /** API-key wiring when `authModes` includes `apiKey`. */
@@ -56,8 +60,10 @@ export interface ConnectionSpec {
   description?: string;
   mcp?: ConnectionIdentity["mcp"];
   openapi?: ConnectionIdentity["openapi"];
-  /** Optional one-line, provider-specific configure note. Keep it short. */
+  /** Optional provider-specific configure guidance, rendered as markdown. */
   configureNote?: string;
+  /** Auth-mode-specific configure guidance, rendered as markdown. */
+  configureNotes?: Partial<Record<AuthMode, string>>;
 }
 
 export interface Integration {
@@ -116,8 +122,11 @@ interface ConnectionPresentation extends Presentation {
   authModes: AuthMode[];
   apiKey?: ApiKeySpec;
   connector?: string;
+  connectors?: Partial<Record<AuthMode, string>>;
   connectorService?: string;
+  connectorServices?: Partial<Record<AuthMode, string>>;
   configureNote?: string;
+  configureNotes?: Partial<Record<AuthMode, string>>;
 }
 
 const channelPresentations: Record<string, ChannelPresentation> = {
@@ -1471,11 +1480,15 @@ const connectionPresentations: Record<string, ConnectionPresentation> = {
     logo: "vercel",
     docsHref: "https://vercel.com/docs/agent-resources/vercel-mcp",
     keywords: ["mcp", "projects", "deployments", "logs", "oauth", "connect"],
-    authModes: ["user"],
+    authModes: ["user", "app"],
     connector: "vercel",
+    connectors: { app: "vercel/your-connector" },
     connectorService: "vercel",
-    configureNote:
-      "When the Connect form asks for a token authentication method, select None. Vercel MCP completes OAuth when the agent first calls an authenticated tool.",
+    connectorServices: { app: "api-key" },
+    configureNotes: {
+      user: "Select None when prompted for a token authentication method. Each user completes OAuth when needed.",
+      app: "Enter a team-scoped [Vercel token](https://vercel.com/kb/guide/how-do-i-use-a-vercel-api-access-token) when prompted, then copy the returned connector UID into the App example. This avoids per-user OAuth, though the Vercel token still belongs to the user who created it.",
+    },
   },
   linear: {
     logo: "linear",
@@ -1993,12 +2006,17 @@ function buildConnection(entry: IntegrationEntry): Integration {
   };
   if (presentation.apiKey !== undefined) spec.apiKey = presentation.apiKey;
   if (presentation.connector !== undefined) spec.connector = presentation.connector;
+  if (presentation.connectors !== undefined) spec.connectors = presentation.connectors;
   if (presentation.connectorService !== undefined) {
     spec.connectorService = presentation.connectorService;
+  }
+  if (presentation.connectorServices !== undefined) {
+    spec.connectorServices = presentation.connectorServices;
   }
   if (identity.mcp !== undefined) spec.mcp = identity.mcp;
   if (identity.openapi !== undefined) spec.openapi = identity.openapi;
   if (presentation.configureNote !== undefined) spec.configureNote = presentation.configureNote;
+  if (presentation.configureNotes !== undefined) spec.configureNotes = presentation.configureNotes;
   return {
     slug: entry.slug,
     name: entry.name,
