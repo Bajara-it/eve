@@ -42,7 +42,7 @@ export const generateMetadata = async ({
   }
 
   const canonicalPath = templatePath(entry.slug);
-  const titleMetadata = pageTitleMetadata(entry.title);
+  const titleMetadata = pageTitleMetadata(`${entry.title} template`);
   return {
     ...titleMetadata,
     description: entry.description,
