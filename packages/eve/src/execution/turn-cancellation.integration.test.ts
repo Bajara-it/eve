@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { getWorld, resumeHook, start } from "#internal/workflow/runtime.js";
 
 import { createTestRuntime, type TestRuntime } from "#internal/testing/app-harness.js";
+import { mockChannelContext } from "#internal/testing/mocks/mock-channel-operations.js";
 import {
   captureTurnEvents,
   containsEventSequence,
@@ -14,17 +15,15 @@ import { sessionCommandHookToken } from "#execution/session-command-token.js";
 import { turnCancellationHookToken } from "#execution/turn-cancellation-token.js";
 import { workflowEntry } from "#execution/workflow-entry.js";
 import { createWorkflowRuntime } from "#execution/workflow-runtime.js";
-import { createEveCancelTurnRoutePath } from "#protocol/routes.js";
+import { createEveSessionCancelRoutePath } from "#protocol/routes.js";
 import type { UnstampedMessageStreamEvent } from "#protocol/message.js";
-import { createCancelFn } from "#channel/cancel.js";
+import { createChannelAddress } from "#channel/channel-address.js";
 import type { RouteHandlerArgs } from "#channel/routes.js";
 import { createSession } from "#channel/session.js";
 import { none } from "#public/channels/auth.js";
 import { eveChannel } from "#public/channels/eve.js";
-import type { Agent } from "#public/definitions/channel.js";
 import type { ToolContext } from "#public/definitions/tool.js";
 import type { ResolvedToolDefinition } from "#runtime/types.js";
-import { attachRouteAgent } from "#internal/nitro/routes/channel-route-context.js";
 import { toInputSchema } from "#shared/tool-schema.js";
 
 /**
@@ -224,74 +223,45 @@ function createCancelRouteCaller(): (
   const runtime = createWorkflowRuntime({
     compiledArtifactsSource: createBundledRuntimeCompiledArtifactsSource(),
   });
-  const agent: Agent = {
-    cancelTurn: (input) =>
-      runtime.dispatchSession({
-        command: { kind: "cancel", turnId: input.turnId },
-        sessionId: input.sessionId,
-      }),
-    async deliver() {
-      throw new Error("cancel route must not deliver");
-    },
-    async getEventStream() {
-      throw new Error("cancel route must not read events");
-    },
-    async run() {
-      throw new Error("cancel route must not start a session");
-    },
-  };
 
   return async (sessionId, body) => {
-    const request = new Request(`https://example.com${createEveCancelTurnRoutePath(sessionId)}`, {
-      method: "POST",
-      ...(body === undefined
-        ? {}
-        : { body: JSON.stringify(body), headers: { "content-type": "application/json" } }),
-    });
-    const args = attachRouteAgent(
+    const request = new Request(
+      `https://example.com${createEveSessionCancelRoutePath(sessionId)}`,
       {
-        send: () => {
-          throw new Error("cancel route must not send");
-        },
-        resolveActiveSession: async () => undefined,
-        cancel: () => {
-          throw new Error("cancel route must not use the channel cancel helper");
-        },
-        clear: () => {
-          throw new Error("cancel route must not clear session context");
-        },
-        compact: () => {
-          throw new Error("cancel route must not compact a session");
-        },
-        reset: () => {
-          throw new Error("cancel route must not reset a session");
-        },
-        getSession: () => {
-          throw new Error("cancel route must not get a session");
-        },
-        receive: () => {
-          throw new Error("cancel route must not receive");
-        },
-        params: { sessionId },
-        waitUntil: () => undefined,
-        requestIp: "127.0.0.1",
-      } satisfies RouteHandlerArgs,
-      agent,
+        method: "POST",
+        ...(body === undefined
+          ? {}
+          : { body: JSON.stringify(body), headers: { "content-type": "application/json" } }),
+      },
     );
+    const args = {
+      ...mockChannelContext(() => {
+        throw new Error("cancel route must not send through a channel address");
+      }),
+      attachSession: (id: string) => createSession(id, runtime),
+      to: () => {
+        throw new Error("cancel route must not send to another channel");
+      },
+      params: { sessionId },
+      waitUntil: () => undefined,
+      requestIp: "127.0.0.1",
+    } satisfies RouteHandlerArgs;
     return await handler(request, args);
   };
 }
 
 async function expectCancelResponse(
   response: Response,
-  expected: { readonly sessionId: string; readonly status: "accepted" | "no_active_turn" },
+  expected:
+    | { readonly sessionId: string; readonly status: "accepted" }
+    | { readonly status: "no_active_turn" },
 ): Promise<void> {
-  expect(response.status).toBe(202);
-  await expect(response.json()).resolves.toEqual({
-    ok: true,
-    sessionId: expected.sessionId,
-    status: expected.status,
-  });
+  expect(response.status).toBe(expected.status === "accepted" ? 202 : 200);
+  await expect(response.json()).resolves.toEqual(
+    expected.status === "accepted"
+      ? { ok: true, sessionId: expected.sessionId, status: "accepted" }
+      : { ok: true, status: "no_active_turn" },
+  );
 }
 
 describe("turn cancellation integration", () => {
@@ -379,7 +349,6 @@ describe("turn cancellation integration", () => {
 
     await fixture.runtime.run(async () => {
       await expectCancelResponse(await cancelViaRoute("missing-session"), {
-        sessionId: "missing-session",
         status: "no_active_turn",
       });
 
@@ -453,13 +422,18 @@ describe("turn cancellation integration", () => {
     const workflowRuntime = createWorkflowRuntime({
       compiledArtifactsSource: createBundledRuntimeCompiledArtifactsSource(),
     });
-    const cancel = createCancelFn(workflowRuntime, "http");
+    const address = (continuationToken: string) =>
+      createChannelAddress({
+        adapter: { kind: "http" },
+        channelName: "http",
+        continuationToken,
+        runtime: workflowRuntime,
+      });
 
     await fixture.runtime.run(async () => {
       // A token no session owns is the benign "nothing to cancel" success
       // and must never start a session.
-      await expect(cancel({ continuationToken: "no-such-thread" })).resolves.toEqual({
-        reason: "HookNotFoundError",
+      await expect(address("no-such-thread").cancel()).resolves.toEqual({
         status: "no_active_turn",
       });
 
@@ -479,7 +453,8 @@ describe("turn cancellation integration", () => {
         await waitForHookByToken(continuationToken);
         await fixture.toolStarted;
 
-        await expect(cancel({ continuationToken: rawToken })).resolves.toEqual({
+        await expect(address(rawToken).cancel()).resolves.toEqual({
+          sessionId: run.runId,
           status: "accepted",
         });
 
@@ -498,8 +473,9 @@ describe("turn cancellation integration", () => {
         expect(fixture.toolAborts()).toBe(1);
 
         // Session.cancel() addresses the same parked session by its stable ID.
-        const session = createSession(run.runId, rawToken, workflowRuntime);
+        const session = createSession(run.runId, workflowRuntime);
         await expect(session.cancel()).resolves.toEqual({
+          sessionId: run.runId,
           status: "accepted",
         });
 

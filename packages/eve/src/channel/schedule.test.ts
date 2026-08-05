@@ -15,7 +15,6 @@ import type { ResolvedChannelDefinition } from "#runtime/types.js";
 
 function createMockRunHandle(): RunHandle {
   return {
-    continuationToken: "slack:C0123ABC:",
     events: new ReadableStream<MessageStreamEvent>(),
     sessionId: "mock-session-id",
   };
@@ -94,7 +93,7 @@ describe("ScheduleDispatcher", () => {
   });
 
   describe("run handler form", () => {
-    it("invokes the author's run() with { receive, waitUntil, appAuth }", async () => {
+    it("invokes the author's run() with { to, waitUntil, appAuth }", async () => {
       const runtime = createMockRuntime();
       vi.stubEnv("SLACK_BOT_TOKEN", "xoxb-test");
       vi.stubEnv("SLACK_SIGNING_SECRET", "test-secret");
@@ -109,12 +108,10 @@ describe("ScheduleDispatcher", () => {
 
         const result = await dispatcher.trigger({
           scheduleId: "daily-digest",
-          async run({ receive, waitUntil, appAuth }) {
+          async run({ to, waitUntil, appAuth }) {
             observed.hasAppAuth = appAuth.principalId === "eve:app";
             observed.hasWaitUntil = typeof waitUntil === "function";
-            await receive(definition, {
-              message: "post the digest",
-              target: { channelId: "C0123ABC" },
+            await to(definition, { channelId: "C0123ABC" }).send("post the digest", {
               auth: appAuth,
             });
           },
@@ -152,7 +149,7 @@ describe("ScheduleDispatcher", () => {
       expect(result.sessions).toHaveLength(0);
     });
 
-    it("throws when args.receive(channel) is called with an unregistered channel", async () => {
+    it("throws when ctx.to(channel) is called with an unregistered channel", async () => {
       const runtime = createMockRuntime();
       const dispatcher = new ScheduleDispatcher({ runtime, channels: [] });
       const stranger = {
@@ -164,8 +161,8 @@ describe("ScheduleDispatcher", () => {
       await expect(
         dispatcher.trigger({
           scheduleId: "stranger",
-          async run({ receive }) {
-            await receive(stranger, { message: "x", target: {}, auth: null });
+          async run({ to }) {
+            await to(stranger, {}).send("x", { auth: null });
           },
         }),
       ).rejects.toThrow(/not registered in this agent/);

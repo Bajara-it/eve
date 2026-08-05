@@ -132,26 +132,14 @@ export interface RuntimeIdentity {
  */
 export type HandleMessageRequestBody =
   | {
+      readonly inputResponses?: never;
       readonly message: string | UserContent;
       readonly clientContext?: string | readonly string[] | JsonObject;
       readonly outputSchema?: JsonObject;
     }
   | {
-      readonly continuationToken: string;
-      readonly message: string | UserContent;
-      readonly clientContext?: string | readonly string[] | JsonObject;
-      readonly outputSchema?: JsonObject;
-    }
-  | {
-      readonly continuationToken: string;
       readonly inputResponses: readonly InputResponse[];
-      readonly clientContext?: string | readonly string[] | JsonObject;
-      readonly outputSchema?: JsonObject;
-    }
-  | {
-      readonly continuationToken: string;
-      readonly inputResponses: readonly InputResponse[];
-      readonly message: string | UserContent;
+      readonly message?: never;
       readonly clientContext?: string | readonly string[] | JsonObject;
       readonly outputSchema?: JsonObject;
     };
@@ -595,7 +583,7 @@ export interface AuthorizationCompletedStreamEvent {
  */
 export interface SessionWaitingStreamEvent {
   data: {
-    /** Channel-owned resume handle for the next user turn. */
+    /** Channel-local continuation token, or the immutable session ID for an ID-only session. */
     continuationToken: string;
     wait: "next-user-message";
   };
@@ -1451,7 +1439,7 @@ export function createCompactionCompletedEvent(input: {
  * wait.
  */
 export function createSessionWaitingEvent(
-  namespacedContinuationToken: string,
+  namespacedContinuationToken: string = "",
 ): SessionWaitingStreamEvent {
   return {
     data: {

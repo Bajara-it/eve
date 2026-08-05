@@ -230,9 +230,10 @@ function typeOnlyFixtures(): void {
         const sessionId: string = ctx.session.id;
         void sessionId;
       },
-      "session.failed"(_data, _channel) {
+      "session.failed"(data, _channel) {
         // session.failed has no ctx — fires outside ALS on terminal failures.
-        void _data;
+        const sessionId: string = data.sessionId;
+        void sessionId;
         void _channel;
       },
     },
@@ -284,15 +285,25 @@ function typeOnlyFixtures(): void {
     },
     events: {
       "turn.started"(_data, channel, ctx) {
-        const continuationToken: string = channel.continuationToken;
+        const continuationToken: string | undefined = channel.continuation?.token;
         const sessionId: string = ctx.session.id;
         void continuationToken;
         void sessionId;
       },
-      "session.failed"(_data, channel) {
-        const continuationToken: string = channel.continuationToken;
+      "session.failed"(data, channel) {
+        const sessionId: string = data.sessionId;
+        const continuationToken: string | undefined = channel.continuation?.token;
+        void sessionId;
         void continuationToken;
       },
+    },
+  });
+
+  eveChannel({
+    auth: none(),
+    // @ts-expect-error canonical eve HTTP messages must dispatch or fail.
+    onMessage() {
+      return null;
     },
   });
 
