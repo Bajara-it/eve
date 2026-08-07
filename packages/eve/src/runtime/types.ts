@@ -10,6 +10,7 @@ import type { OutboundAuthFn } from "#public/agents/auth.js";
 import type { StreamEventHook } from "#public/definitions/hook.js";
 import type { Approval } from "#public/definitions/approval.js";
 import type { ToolModelOutput } from "#public/definitions/tool.js";
+import type { ConnectionToolCallDefinition } from "#public/definitions/connections/tool-call.js";
 import type {
   AuthorizationDefinition,
   ConnectionAuthResolver,
@@ -101,6 +102,7 @@ export interface ResolvedConnectionDefinition extends ResolvedModuleSourceRef {
   readonly connectionName: string;
   readonly description: string;
   readonly headers?: Readonly<HeadersDefinition>;
+  readonly toolCall?: Readonly<ConnectionToolCallDefinition>;
   /**
    * Wire protocol. Selects the runtime client implementation. `tools`
    * carries the connection's operation/tool filter regardless of
