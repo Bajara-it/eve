@@ -7,6 +7,7 @@ const manifestEntry: TemplateManifestEntry = {
   slug: "example",
   title: "Example agent template",
   description: "An example template.",
+  demoHref: "https://example.vercel.app",
   category: "Example",
   integrations: ["HTTP API"],
   model: "anthropic/claude-sonnet-5",
@@ -39,10 +40,13 @@ describe("composeTemplateEntries", () => {
 
     expect(entry.slug).toBe("example");
     expect(entry.title).toBe("Example agent template");
+    expect(entry.demoHref).toBe("https://example.vercel.app");
     expect(entry.sourceRevision).toBe("0123456789abcdef0123456789abcdef01234567");
     expect(entry.sourceRevisionHref).toBe(
       "https://github.com/vercel-labs/example/tree/0123456789abcdef0123456789abcdef01234567",
     );
+    expect(entry.githubOwner).toBe("vercel-labs");
+    expect(entry.githubRepo).toBe("example");
     expect(entry.readme).toBe(generated.templates.example.readme);
     expect(entry.files).toEqual(generated.templates.example.files);
     expect(entry).not.toHaveProperty("github");

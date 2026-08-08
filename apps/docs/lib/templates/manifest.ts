@@ -30,6 +30,7 @@ export interface TemplateManifestEntry {
   slug: string;
   title: string;
   description: string;
+  demoHref?: string;
   category: TemplateCategory;
   integrations: TemplateIntegration[];
   model: string;
@@ -49,19 +50,17 @@ export const templateManifest: TemplateManifestEntry[] = [
       "Set up the eve chat template in my current workspace using https://github.com/vercel-labs/eve-chat-template/tree/main as the source. Copy the project files, install its dependencies, and follow the repository README to configure it. Preserve the existing project if the workspace is not empty, and tell me about any required environment variables or manual setup steps.",
     description:
       "A persisted Next.js chat template for eve, built with shadcn/ui, Tailwind CSS, Streamdown, Better Auth, Drizzle, Neon, and Upstash Redis.",
+    demoHref: "https://eve-chat-template.labs.vercel.dev",
     sourceHref: "https://github.com/vercel-labs/eve-chat-template/tree/main",
     category: "Chat",
     model: "anthropic/claude-sonnet-5",
-    integrations: ["Web chat", "Slack", "Linear", "Notion", "Sentry"],
+    integrations: ["Web chat", "Slack"],
     source: "Vercel Templates",
     github: { owner: "vercel-labs", repo: "eve-chat-template", ref: "main" },
     files: [
       "agent/agent.ts",
       "agent/channels/eve.ts",
       "agent/channels/slack.ts",
-      "agent/connections/linear.ts",
-      "agent/connections/notion.ts",
-      "agent/connections/sentry.ts",
       "agent/instructions.md",
       "agent/skills/plan_a_trip.md",
       "agent/tools/get_weather.ts",
