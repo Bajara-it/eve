@@ -1,5 +1,4 @@
 import { interactiveAsker } from "#setup/ask.js";
-import type { RegistrySetupFact } from "#setup/registry-setup-protocol.js";
 import { detectDeployment, projectResolutionFromDeployment } from "#setup/project-resolution.js";
 import type { Prompter } from "#setup/prompter.js";
 import { getVercelAuthStatus } from "#setup/vercel-project.js";
@@ -10,6 +9,7 @@ import {
 } from "./shared/environment.js";
 import { createIntegrationSetupUi } from "./shared/ui.js";
 import { setupIntegration } from "./registry.js";
+import type { IntegrationSetupResult } from "./types.js";
 
 /** Inputs shared by every registry-owned integration setup flow. */
 export interface RunIntegrationSetupOptions {
@@ -30,17 +30,12 @@ const defaultDeps: IntegrationSetupRunnerDeps = {
   getVercelAuthStatus,
 };
 
-/** Outcome returned by one registry-owned integration setup flow. */
-export type IntegrationSetupOutcome =
-  | { kind: "cancelled" }
-  | { kind: "done"; facts?: readonly RegistrySetupFact[] };
-
 /** Runs one built-in integration setup flow selected by its registry setup name. */
 export async function runIntegrationSetup(
   kind: string,
   options: RunIntegrationSetupOptions,
   deps: IntegrationSetupRunnerDeps = defaultDeps,
-): Promise<IntegrationSetupOutcome> {
+): Promise<IntegrationSetupResult> {
   const integration = setupIntegration(kind);
   options.prompter.intro(`Set up ${integration.label}`);
   options.prompter.log.message("Checking Vercel setup...");
@@ -51,7 +46,7 @@ export async function runIntegrationSetup(
   const project = projectResolutionFromDeployment(deployment);
   const environment = integrationSetupEnvironment(authStatus, project);
   options.prompter.log.info(describeIntegrationSetupEnvironment(environment));
-  const result = await integration.setup({
+  const context = {
     environment,
     appRoot: options.appRoot,
     ui: createIntegrationSetupUi({
@@ -60,6 +55,6 @@ export async function runIntegrationSetup(
     }),
     yes: options.yes,
     signal: options.signal,
-  });
-  return result;
+  };
+  return integration.setup(context);
 }

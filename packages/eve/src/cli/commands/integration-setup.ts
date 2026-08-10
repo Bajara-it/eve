@@ -54,7 +54,7 @@ export async function runIntegrationSetupCommand(
       return;
     }
     prompter.outro("Integration set up.");
-    client?.complete(result.facts);
+    client?.complete(result.completion);
   } catch (error) {
     client?.fail(error);
     logger.error(error instanceof Error ? error.message : String(error));

@@ -11,6 +11,7 @@ import {
   type ProvisionSlackbotResult,
 } from "#setup/slackbot.js";
 import { WizardCancelledError } from "#setup/step.js";
+import { slackMessageDeepLink } from "#setup/slack-connect.js";
 
 import { installScaffoldDependencies, reportOverwrittenFiles } from "../shared/scaffold.js";
 import type {
@@ -191,7 +192,10 @@ export async function setupSlack(
       "Set SLACK_BOT_TOKEN and SLACK_SIGNING_SECRET in .env.local (listed in .env.example).",
       "Configure your Slack app to send events to /eve/v1/slack on your public agent URL.",
     ]);
-    return { kind: "done" };
+    return {
+      kind: "done",
+      completion: { facts: [], deploymentRequired: true },
+    };
   }
 
   const project = await deps.ensureVercelProject({
@@ -226,7 +230,22 @@ export async function setupSlack(
     projectPath: context.appRoot,
     signal: context.signal,
   });
-  return { kind: "done" };
+  return {
+    kind: "done",
+    completion: {
+      facts:
+        slackbot.chatUrl === undefined
+          ? []
+          : [
+              {
+                label: "Agent Slack DM",
+                value: slackMessageDeepLink(slackbot.chatUrl),
+                kind: "url",
+              },
+            ],
+      deploymentRequired: true,
+    },
+  };
 }
 
 /** Slack setup registration. */

@@ -11,6 +11,7 @@ import {
   isRegistrySetupChildMessage,
   REGISTRY_SETUP_PROTOCOL_VERSION,
   type RegistrySetupChildMessage,
+  type RegistrySetupCompletion,
   type RegistrySetupParentMessage,
 } from "#setup/registry-setup-protocol.js";
 import { WizardCancelledError } from "#setup/step.js";
@@ -22,7 +23,7 @@ export interface RegistrySetupCommand {
 }
 
 export type RegistrySetupCommandResult =
-  | { kind: "completed"; output: readonly string[] }
+  | ({ kind: "completed" } & RegistrySetupCompletion)
   | { kind: "cancelled" };
 
 export interface RegistrySetupCommandOptions {
@@ -141,10 +142,19 @@ function handlePresentation(
 ): boolean {
   switch (message.type) {
     case "log":
-      prompter.log[message.level](message.text);
+      if (
+        prompter.replaceContent === undefined ||
+        message.level === "warning" ||
+        message.level === "error" ||
+        message.level === "commandOutput"
+      ) {
+        prompter.log[message.level](message.text);
+      }
       return true;
     case "note":
-      prompter.note(message.message, message.title, { tone: message.tone });
+      if (prompter.replaceContent === undefined || message.tone === "warning") {
+        prompter.note(message.message, message.title, { tone: message.tone });
+      }
       return true;
     case "intro":
       prompter.intro(message.text, message.subtitle);
@@ -277,10 +287,12 @@ export async function runRegistrySetupCommand(
           );
           return;
         }
-        resolveResult({
+        const result: RegistrySetupCommandResult = {
           kind: "completed",
-          output: outcome.facts.map((fact) => `${fact.label}: ${fact.value}`),
-        });
+          facts: outcome.facts,
+        };
+        if (outcome.deploymentRequired === true) result.deploymentRequired = true;
+        resolveResult(result);
         return;
       }
       if (outcome?.kind === "cancelled") {
@@ -288,10 +300,7 @@ export async function runRegistrySetupCommand(
         return;
       }
       if (outcome?.kind === "failed") {
-        const details = outcome.error.details?.length
-          ? `\n${outcome.error.details.join("\n")}`
-          : "";
-        reject(new Error(`${outcome.error.message}${details}`));
+        reject(new Error(outcome.error.message));
         return;
       }
       if (options.signal?.aborted === true || code === 130 || signal === "SIGINT") {

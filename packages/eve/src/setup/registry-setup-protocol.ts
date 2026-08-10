@@ -16,13 +16,18 @@ export type RegistrySetupFact = {
   kind?: "text" | "url" | "phone";
 };
 
+export type RegistrySetupCompletion = {
+  facts: readonly RegistrySetupFact[];
+  deploymentRequired?: true;
+};
+
 export type RegistrySetupError = {
   message: string;
   details?: readonly string[];
 };
 
 export type RegistrySetupOutcome =
-  | { kind: "completed"; facts: readonly RegistrySetupFact[] }
+  | ({ kind: "completed" } & RegistrySetupCompletion)
   | { kind: "cancelled" }
   | { kind: "failed"; error: RegistrySetupError };
 

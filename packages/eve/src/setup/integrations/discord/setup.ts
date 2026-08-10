@@ -148,13 +148,16 @@ export async function setupDiscord(
     ]);
     return {
       kind: "done",
-      facts: [
-        {
-          label: "Discord application",
-          value: `https://discord.com/developers/applications/${application.id}/information`,
-          kind: "url",
-        },
-      ],
+      completion: {
+        deploymentRequired: true,
+        facts: [
+          {
+            label: "Discord application dashboard",
+            value: `https://discord.com/developers/applications/${application.id}/information`,
+            kind: "url",
+          },
+        ],
+      },
     };
   } catch (error) {
     if (error instanceof WizardCancelledError) return { kind: "cancelled" };

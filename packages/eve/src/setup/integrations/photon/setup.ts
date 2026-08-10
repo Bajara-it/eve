@@ -21,18 +21,21 @@ export const PHOTON_SETUP: SetupIntegration = {
     if (result.kind === "cancelled") return result;
     return {
       kind: "done",
-      facts: [
-        ...(result.assignedPhoneNumber === undefined
-          ? []
-          : [
-              {
-                label: "Text your agent",
-                value: result.assignedPhoneNumber,
-                kind: "phone" as const,
-              },
-            ]),
-        { label: "Photon project", value: result.dashboardUrl, kind: "url" as const },
-      ],
+      completion: {
+        deploymentRequired: true,
+        facts: [
+          ...(result.assignedPhoneNumber === undefined
+            ? []
+            : [
+                {
+                  label: "Agent phone number",
+                  value: result.assignedPhoneNumber,
+                  kind: "phone" as const,
+                },
+              ]),
+          { label: "Photon project dashboard", value: result.dashboardUrl, kind: "url" as const },
+        ],
+      },
     };
   },
 };

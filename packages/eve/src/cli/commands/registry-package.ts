@@ -5,6 +5,8 @@ import {
 } from "#compiled/shadcn-registry/index.js";
 import { z } from "#compiled/zod/index.js";
 import { createPrompter, type Prompter } from "#setup/prompter.js";
+import { mergeRegistrySetupCompletions } from "#setup/registry-setup-completion.js";
+import type { RegistrySetupCompletion } from "#setup/registry-setup-protocol.js";
 
 import { hasInteractiveTerminal } from "./preconditions.js";
 import type { AddCommandOptions, RegistryCommandLogger } from "./registry.js";
@@ -37,7 +39,7 @@ export interface RegistryPackageOperations {
     item: string;
     setups: RegistrySetupCommand[];
     prompter: Prompter;
-  }): Promise<boolean>;
+  }): Promise<RegistrySetupCompletion | false>;
   setupReminder(item: string): string;
 }
 
@@ -80,7 +82,7 @@ export async function runRegistryPackage(input: {
   options: AddCommandOptions & { prompter?: Prompter; signal?: AbortSignal };
   dependencies: RegistryPackageDependencies;
   operations: RegistryPackageOperations;
-}): Promise<void> {
+}): Promise<RegistrySetupCompletion | false> {
   const { logger, appRoot, item, components, config, options, dependencies, operations } = input;
   const interactive = dependencies.hasInteractiveTerminal?.() ?? hasInteractiveTerminal();
   let prompter = options.prompter;
@@ -107,16 +109,23 @@ export async function runRegistryPackage(input: {
       silent: options.silent,
     });
   }
-  if (options.skipSetup === true) return;
+  let completion: RegistrySetupCompletion = { facts: [] };
+  if (options.skipSetup === true) return completion;
 
   if (options.yes !== true && options.prompter === undefined && !interactive) {
     logger.log(operations.setupReminder(item));
-    return;
+    return completion;
   }
 
   for (const metadata of entries) {
     if (metadata?.setup === undefined) continue;
-    if (!(await operations.runSetups({ item, setups: metadata.setup, prompter: getPrompter() })))
-      return;
+    const result = await operations.runSetups({
+      item,
+      setups: metadata.setup,
+      prompter: getPrompter(),
+    });
+    if (result === false) return false;
+    completion = mergeRegistrySetupCompletions(completion, result);
   }
+  return completion;
 }
