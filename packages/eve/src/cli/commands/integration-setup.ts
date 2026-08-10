@@ -1,3 +1,4 @@
+import { ensureVercelProject } from "#setup/flows/ensure-vercel-project.js";
 import { createPrompter, type Prompter } from "#setup/prompter.js";
 import { createRegistrySetupClient } from "#setup/registry-setup-client.js";
 import {
@@ -43,8 +44,13 @@ export async function runIntegrationSetupCommand(
       {
         appRoot,
         prompter,
+        resolveVercelProject: () =>
+          ensureVercelProject({
+            appRoot,
+            prompter,
+            signal: client?.signal ?? options.signal,
+          }),
         signal: client?.signal ?? options.signal,
-        yes: options.yes,
       },
       dependencies.runnerDeps,
     );

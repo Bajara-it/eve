@@ -1,5 +1,9 @@
-import { interactiveAsker } from "#setup/ask.js";
-import { detectDeployment, projectResolutionFromDeployment } from "#setup/project-resolution.js";
+import { interactiveAsker, type Asker } from "#setup/ask.js";
+import {
+  detectDeployment,
+  projectResolutionFromDeployment,
+  type VercelProjectReference,
+} from "#setup/project-resolution.js";
 import type { Prompter } from "#setup/prompter.js";
 import { getVercelAuthStatus } from "#setup/vercel-project.js";
 
@@ -7,7 +11,8 @@ import {
   integrationSetupEnvironment,
   describeIntegrationSetupEnvironment,
 } from "./shared/environment.js";
-import { createIntegrationSetupUi } from "./shared/ui.js";
+import { resolveIntegrationVercelProject } from "./shared/vercel-project.js";
+import { createSetupContexts } from "./shared/ui.js";
 import { setupIntegration } from "./registry.js";
 import type { IntegrationSetupResult } from "./types.js";
 
@@ -15,11 +20,17 @@ import type { IntegrationSetupResult } from "./types.js";
 export interface RunIntegrationSetupOptions {
   appRoot: string;
   prompter: Prompter;
+  /** Defaults to the interactive adapter; agent drivers inject an answer-backed asker. */
+  asker?: Asker;
   signal?: AbortSignal;
-  yes?: boolean;
+  force?: boolean;
+  beginExternalAction?: (input: { url: string; userCode?: string; message: string }) => void;
+  resolveVercelProject?: SetupProjectResolver;
 }
 
 /** Effects shared by the built-in integration setup runner. */
+export type SetupProjectResolver = (integration: string) => Promise<VercelProjectReference>;
+
 export interface IntegrationSetupRunnerDeps {
   detectDeployment: typeof detectDeployment;
   getVercelAuthStatus: typeof getVercelAuthStatus;
@@ -46,15 +57,23 @@ export async function runIntegrationSetup(
   const project = projectResolutionFromDeployment(deployment);
   const environment = integrationSetupEnvironment(authStatus, project);
   options.prompter.log.info(describeIntegrationSetupEnvironment(environment));
-  const context = {
-    environment,
-    appRoot: options.appRoot,
-    ui: createIntegrationSetupUi({
-      asker: interactiveAsker(options.prompter),
+  return integration.run(
+    createSetupContexts({
+      appRoot: options.appRoot,
+      asker: options.asker ?? interactiveAsker(options.prompter),
+      environment,
       prompter: options.prompter,
+      resolveVercelProject:
+        options.resolveVercelProject ??
+        ((integration) =>
+          resolveIntegrationVercelProject({
+            appRoot: options.appRoot,
+            integration,
+            signal: options.signal,
+          })),
+      signal: options.signal,
+      force: options.force,
+      beginExternalAction: options.beginExternalAction,
     }),
-    yes: options.yes,
-    signal: options.signal,
-  };
-  return integration.setup(context);
+  );
 }
