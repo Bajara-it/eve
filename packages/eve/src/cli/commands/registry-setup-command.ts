@@ -13,6 +13,7 @@ import {
   type RegistrySetupChildMessage,
   type RegistrySetupCompletion,
   type RegistrySetupParentMessage,
+  type RegistrySetupBlocker,
 } from "#setup/registry-setup-protocol.js";
 import { WizardCancelledError } from "#setup/step.js";
 
@@ -24,6 +25,7 @@ export interface RegistrySetupCommand {
 
 export type RegistrySetupCommandResult =
   | ({ kind: "completed" } & RegistrySetupCompletion)
+  | { kind: "blocked"; blocker: RegistrySetupBlocker }
   | { kind: "cancelled" };
 
 export interface RegistrySetupCommandOptions {
@@ -293,6 +295,10 @@ export async function runRegistrySetupCommand(
         };
         if (outcome.deploymentRequired === true) result.deploymentRequired = true;
         resolveResult(result);
+        return;
+      }
+      if (outcome?.kind === "blocked") {
+        resolveResult({ kind: "blocked", blocker: outcome.blocker });
         return;
       }
       if (outcome?.kind === "cancelled") {
