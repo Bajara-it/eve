@@ -10,10 +10,19 @@ type NextSessionAction =
   | { readonly kind: "compact" }
   | { readonly kind: "expired" }
   | { readonly kind: "reset" }
+  | AuthorizationCallbackInstruction
   | {
       readonly delivery: DeliverHookPayload | null;
       readonly kind: "delivery";
     };
+
+/** One authorization-callback read surfaced during a parked wait. */
+export interface AuthorizationCallbackInstruction {
+  readonly kind: "authorization";
+  /** True when the authorization hook closed; no further callbacks can arrive. */
+  readonly closed: boolean;
+  readonly payloads: readonly DeliverPayload[];
+}
 
 /** What the parked driver should do with the next session activity. */
 export type NextTurnInstruction =
@@ -23,6 +32,7 @@ export type NextTurnInstruction =
   | { readonly kind: "reset" }
   | { readonly kind: "closed" }
   | { readonly kind: "cancel-turn" }
+  | AuthorizationCallbackInstruction
   | {
       readonly kind: "turn";
       readonly deliver: DeliverHookPayload;
@@ -35,11 +45,39 @@ export type NextTurnInstruction =
  * no turn to run, so this keeps waiting until a delivery produces a parent
  * turn, a cancellation, expiry, or hook closure. The wait is unbounded by
  * design: a parked session lives until something addresses it.
+ *
+ * With `awaitAuthorizationCallbacks`, the inbox's authorization window stays
+ * open for the whole wait — including iterations that consume activity
+ * without producing a parent turn (no-op cancels, fully-routed descendant
+ * deliveries) — so an open challenge's callback surfaces as an
+ * `"authorization"` instruction no matter when it arrives.
  */
 export async function nextTurnDelivery(input: {
+  readonly awaitAuthorizationCallbacks?: boolean;
   readonly bufferedDeliveries: DeliverHookPayload[];
   readonly bufferedSessionControls: Array<"clear" | "compact" | "expired" | "reset">;
   readonly commandInbox: SessionCommandInbox;
+  readonly deferDeliveries?: boolean;
+  readonly driverWritable: WritableStream<Uint8Array>;
+  readonly sessionState: DurableSessionState;
+}): Promise<NextTurnInstruction> {
+  if (input.awaitAuthorizationCallbacks !== true) {
+    return await awaitNextTurnDelivery(input);
+  }
+
+  input.commandInbox.setAuthorizationWindow(true);
+  try {
+    return await awaitNextTurnDelivery(input);
+  } finally {
+    input.commandInbox.setAuthorizationWindow(false);
+  }
+}
+
+async function awaitNextTurnDelivery(input: {
+  readonly bufferedDeliveries: DeliverHookPayload[];
+  readonly bufferedSessionControls: Array<"clear" | "compact" | "expired" | "reset">;
+  readonly commandInbox: SessionCommandInbox;
+  readonly deferDeliveries?: boolean;
   readonly driverWritable: WritableStream<Uint8Array>;
   readonly sessionState: DurableSessionState;
 }): Promise<NextTurnInstruction> {
@@ -48,7 +86,12 @@ export async function nextTurnDelivery(input: {
       bufferedDeliveries: input.bufferedDeliveries,
       bufferedSessionControls: input.bufferedSessionControls,
       commandInbox: input.commandInbox,
+      deferDeliveries: input.deferDeliveries,
     });
+
+    if (nextAction.kind === "authorization") {
+      return nextAction;
+    }
 
     if (nextAction.kind !== "delivery") {
       return { kind: nextAction.kind };
@@ -83,13 +126,18 @@ async function waitForNextSessionAction(input: {
   readonly bufferedDeliveries: DeliverHookPayload[];
   readonly bufferedSessionControls: Array<"clear" | "compact" | "expired" | "reset">;
   readonly commandInbox: SessionCommandInbox;
+  readonly deferDeliveries?: boolean;
 }): Promise<NextSessionAction> {
   const pendingSessionControl = input.bufferedSessionControls.shift();
   if (pendingSessionControl !== undefined) {
     return { kind: pendingSessionControl };
   }
 
-  if (input.bufferedDeliveries.length > 0) {
+  if (
+    input.deferDeliveries !== true &&
+    !input.commandInbox.hasReadyAuthorization() &&
+    input.bufferedDeliveries.length > 0
+  ) {
     return {
       delivery: takeBufferedTurnDelivery(input.bufferedDeliveries),
       kind: "delivery",
@@ -97,8 +145,19 @@ async function waitForNextSessionAction(input: {
   }
 
   while (true) {
-    const first = await input.commandInbox.next();
+    const { result: first, source } = await input.commandInbox.nextWithSource();
     input.commandInbox.consumeNext();
+
+    if (source === "authorization") {
+      if (first.done) {
+        return { closed: true, kind: "authorization", payloads: [] };
+      }
+      return {
+        closed: false,
+        kind: "authorization",
+        payloads: first.value.kind === "deliver" ? first.value.payloads : [],
+      };
+    }
 
     if (first.done) {
       return { delivery: null, kind: "delivery" };
@@ -121,10 +180,19 @@ async function waitForNextSessionAction(input: {
     }
 
     if (first.value.kind === "deliver") {
+      if (input.deferDeliveries === true) {
+        input.bufferedDeliveries.push(first.value);
+        continue;
+      }
       return { delivery: first.value, kind: "delivery" };
     }
 
-    return { delivery: sendCommandToDelivery(first.value), kind: "delivery" };
+    const delivery = sendCommandToDelivery(first.value);
+    if (input.deferDeliveries === true) {
+      input.bufferedDeliveries.push(delivery);
+      continue;
+    }
+    return { delivery, kind: "delivery" };
   }
 }
 

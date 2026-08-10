@@ -137,11 +137,15 @@ import { normalizeUserContent, resolveAssistantStepText } from "#harness/message
 import { normalizeProviderToolHistory } from "#harness/provider-tool-history.js";
 import {
   type AuthorizationSignal,
+  getSupersededAuthorizationChallenges,
   isAuthorizationSignal,
   setPendingAuthorization,
 } from "#harness/authorization.js";
 import { readToolInterrupt } from "#harness/tool-interrupts.js";
-import { createAuthorizationRequiredEvent } from "#protocol/message.js";
+import {
+  createAuthorizationCompletedEvent,
+  createAuthorizationRequiredEvent,
+} from "#protocol/message.js";
 import {
   classifyModelCallError,
   EmptyModelResponseError,
@@ -2174,6 +2178,22 @@ async function handleStepResult(input: {
     const { challenges } = authSignal;
 
     if (emit) {
+      for (const superseded of getSupersededAuthorizationChallenges(
+        baseSession.state,
+        challenges,
+      )) {
+        await emit(
+          createAuthorizationCompletedEvent({
+            authorization: superseded.challenge,
+            name: superseded.name,
+            outcome: "failed",
+            reason: "Superseded by a newer authorization attempt.",
+            sequence: emissionState.sequence,
+            stepIndex: emissionState.stepIndex,
+            turnId: emissionState.turnId,
+          }),
+        );
+      }
       for (const ch of challenges) {
         await emit(
           createAuthorizationRequiredEvent({
@@ -2186,6 +2206,14 @@ async function handleStepResult(input: {
             turnId: emissionState.turnId,
           }),
         );
+      }
+
+      // An authorization park is a between-turn wait like the input park
+      // above: the session keeps serving ordinary turns while the challenge
+      // is open, so the stream must close its turn boundary — clients wait
+      // on `session.waiting` and would otherwise hang on the parked turn.
+      if (config.mode === "conversation") {
+        emissionState = await emitTurnEpilogue(emit, emissionState, config.mode);
       }
     }
 

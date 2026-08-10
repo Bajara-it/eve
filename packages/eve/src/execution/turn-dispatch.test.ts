@@ -222,10 +222,16 @@ describe("dispatchAndAwaitTurn", () => {
 
 function createCommandInbox(overrides: Partial<SessionCommandInbox> = {}): SessionCommandInbox {
   return {
+    claimAuthorization: vi.fn(),
     claimStable: vi.fn(),
     consumeNext: vi.fn(),
+    hasReadyAuthorization: vi.fn(() => false),
     next: vi.fn(() => new Promise<IteratorResult<SessionInboxPayload>>(() => {})),
+    nextWithSource: vi.fn(() =>
+      Promise.reject(new Error("nextWithSource is not modeled by this test inbox.")),
+    ),
     rekeyContinuation: vi.fn(),
+    setAuthorizationWindow: vi.fn(),
     ...overrides,
   };
 }
