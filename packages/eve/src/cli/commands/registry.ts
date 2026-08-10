@@ -14,9 +14,18 @@ import { WizardCancelledError } from "#setup/step.js";
 
 import { hasInteractiveTerminal, NOT_AN_AGENT_MESSAGE } from "./preconditions.js";
 import { runDeclaredSetups } from "./registry-declared-setups.js";
-import { eveMetadataFromRegistryItem } from "./registry-metadata.js";
+import {
+  eveMetadataFromRegistryItem,
+  parseOfficialRegistrySearchMetadata,
+  type RegistrySearchMetadata,
+} from "./registry-metadata.js";
 import { runRegistryPackage } from "./registry-package.js";
-import { printRegistrySearchResults } from "./registry-search-presentation.js";
+import {
+  printRegistrySearchResults,
+  registryViewText,
+  type RegistrySearchPresentationItem,
+  type RegistrySearchPresentationSection,
+} from "./registry-presentation.js";
 import type { runRegistrySetupCommand } from "./registry-setup-command.js";
 import { serializeHeadlessSetupEvent } from "./setup-headless.js";
 import { addRegistryMappings, readRegistryConfig } from "./registry-project.js";
@@ -224,14 +233,47 @@ function validateRegistrySource(source: string | undefined): void {
 
 type RegistrySearchResult = Awaited<ReturnType<typeof searchRegistries>>;
 
+async function loadOfficialSearchMetadata(): Promise<ReadonlyMap<string, RegistrySearchMetadata>> {
+  const response = await fetch(OFFICIAL_CATALOG);
+  if (!response.ok) throw new Error(`Could not read the eve registry (${response.status}).`);
+  return parseOfficialRegistrySearchMetadata(await response.json());
+}
+
+function searchItemAddress(item: RegistrySearchItem): string {
+  return item.registry === OFFICIAL_CATALOG ? item.name : item.addCommandArgument;
+}
+
+function enrichSearchItem(
+  item: RegistrySearchItem,
+  metadataByAddress: ReadonlyMap<string, RegistrySearchMetadata>,
+): RegistrySearchPresentationItem {
+  const address = searchItemAddress(item);
+  return { item, address, ...metadataByAddress.get(address) };
+}
+
 function registrySourceLabel(source: string): string {
   if (source === OFFICIAL_CATALOG) return "eve";
   if (source === SKILLS_REGISTRY) return "skills.sh";
   return source;
 }
 
-function searchItemAddress(item: RegistrySearchItem): string {
-  return item.registry === OFFICIAL_CATALOG ? item.name : item.addCommandArgument;
+function searchPresentationSections(
+  sources: readonly string[],
+  resultsBySource: ReadonlyMap<string, RegistrySearchResult>,
+  metadataByAddress: ReadonlyMap<string, RegistrySearchMetadata>,
+): RegistrySearchPresentationSection[] {
+  return sources.flatMap((source) => {
+    const result = resultsBySource.get(source);
+    return result === undefined
+      ? []
+      : [
+          {
+            label: registrySourceLabel(source),
+            items: result.items.map((item) => enrichSearchItem(item, metadataByAddress)),
+            total: result.pagination.total,
+          },
+        ];
+  });
 }
 
 async function searchRegistryCatalog(
@@ -289,6 +331,17 @@ async function searchRegistryCatalog(
   const uniqueErrors = new Map(
     errors.map((error) => [`${error.registry}\0${error.message}`, error]),
   );
+  const metadataByAddress = resultsBySource.has(OFFICIAL_CATALOG)
+    ? await loadOfficialSearchMetadata()
+    : new Map<string, RegistrySearchMetadata>();
+  const official = resultsBySource.get(OFFICIAL_CATALOG);
+  if (official !== undefined) {
+    official.items.sort((left, right) => {
+      const rank = (item: RegistrySearchItem) =>
+        metadataByAddress.get(searchItemAddress(item))?.implementation === "native" ? 0 : 1;
+      return rank(left) - rank(right);
+    });
+  }
   const results = [...resultsBySource.values()];
   const result: RegistrySearchResult = {
     items: results.flatMap((entry) => entry.items),
@@ -300,7 +353,7 @@ async function searchRegistryCatalog(
     },
     ...(uniqueErrors.size > 0 ? { errors: [...uniqueErrors.values()] } : {}),
   };
-  return { config, result, resultsBySource, sources };
+  return { config, result, resultsBySource, sources, metadataByAddress };
 }
 
 function registryManifestTitle(manifest: unknown): string | undefined {
@@ -347,27 +400,26 @@ async function browseRegistryItems(
   source: string | undefined,
   options: RegistrySearchCommandOptions = {},
 ): Promise<void> {
-  const { result, resultsBySource, sources } = await searchRegistryCatalog(appRoot, {
-    limit: options.limit,
-    query,
-    source,
-  });
+  const { result, resultsBySource, sources, metadataByAddress } = await searchRegistryCatalog(
+    appRoot,
+    {
+      limit: options.limit,
+      query,
+      source,
+    },
+  );
   const errors = result.errors ?? [];
   if (options.json || resultsBySource.size > 0) {
-    const sections = sources.flatMap((source) => {
-      const sourceResult = resultsBySource.get(source);
-      return sourceResult === undefined
-        ? []
-        : [
-            {
-              label: registrySourceLabel(source),
-              items: sourceResult.items,
-              total: sourceResult.pagination.total,
-              address: searchItemAddress,
-            },
-          ];
-    });
-    printRegistrySearchResults(logger, result, { ...options, query, sections });
+    const items = result.items.map((item) => ({
+      ...item,
+      ...metadataByAddress.get(searchItemAddress(item)),
+    }));
+    const presentation: Parameters<typeof printRegistrySearchResults>[1] = {
+      query,
+      sections: searchPresentationSections(sources, resultsBySource, metadataByAddress),
+    };
+    if (options.json) presentation.json = { ...result, items };
+    printRegistrySearchResults(logger, presentation);
   }
   for (const error of errors) {
     logger.error(`${error.registry}: ${error.message}`);
@@ -571,6 +623,12 @@ export async function runAddCommand(
           type: "completed",
           item,
           completedItems: [item],
+          ...(completion.deploymentRequired === true
+            ? {
+                deploymentRequired: true as const,
+                next: { command: "eve", args: ["deploy"] },
+              }
+            : {}),
         }),
       );
     }
@@ -626,15 +684,17 @@ export async function runRegistrySearchCommand(
   );
 }
 
-/** Prints one official, configured, or URL-addressed registry item as JSON. */
+/** Inspects one official, configured, or URL-addressed registry item. */
 export async function runRegistryViewCommand(
   logger: RegistryCommandLogger,
   appRoot: string,
   item: string,
+  options: RegistryCommandOptions = {},
 ): Promise<void> {
   await runRegistryAction(logger, appRoot, async () => {
     const config = await readEveRegistryConfig(appRoot);
     const items = await getRegistryItems([itemAddress(item)], { config });
-    logger.log(JSON.stringify(items.length === 1 ? items[0] : items, null, 2));
+    const result = items.length === 1 ? items[0] : items;
+    logger.log(options.json ? JSON.stringify(result, null, 2) : registryViewText(item, result));
   });
 }
