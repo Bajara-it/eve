@@ -11,6 +11,7 @@ import { MockLanguageModelV3 } from "ai/test";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { ContextContainer, contextStorage } from "#context/container.js";
+import { DynamicModelSelectionError } from "#context/dynamic-model-lifecycle.js";
 import {
   AuthKey,
   ChannelInstrumentationKey,
@@ -909,20 +910,23 @@ describe("createToolLoopHarness", () => {
       toolResults: [],
     });
 
+    const selectedModel = new MockLanguageModelV3({
+      modelId: "gpt-5",
+      provider: "openai.chat",
+    });
     const resolveModel = vi.fn().mockResolvedValue("fallback-model" as LanguageModel);
     const dispatchDynamicModelEvent: NonNullable<
       ToolLoopHarnessConfig["dispatchDynamicModelEvent"]
-    > = vi.fn(async ({ ctx, event, fallback, messages }) => {
+    > = vi.fn(async ({ ctx, event, messages }) => {
       expect(event.type).toBe("step.started");
       expect(messages.at(-1)).toEqual({ content: "Hi", role: "user" });
-      expect(fallback).toEqual({ contextWindowTokens: 100_000, id: "fallback-model" });
 
       ctx.setVirtualContext(LiveStepDynamicModelSelectionKey, {
-        model: "selected-model" as LanguageModel,
+        model: selectedModel,
         reference: {
           contextWindowTokens: 200_000,
-          id: "selected-model",
-          providerOptions: { gateway: { order: ["openai"] } },
+          id: "openai/gpt-5",
+          providerOptions: { openai: { parallelToolCalls: false } },
         },
       });
     });
@@ -934,8 +938,7 @@ describe("createToolLoopHarness", () => {
     const ctx = new ContextContainer();
     const session = createTestSession({
       agent: {
-        dynamicModelDefaultReference: { contextWindowTokens: 100_000, id: "fallback-model" },
-        modelReference: { contextWindowTokens: 100_000, id: "fallback-model" },
+        dynamicModel: true,
         system: "You are a test assistant.",
         tools: [{ description: "Adds numbers", name: "add", inputSchema: { type: "object" } }],
       },
@@ -946,13 +949,24 @@ describe("createToolLoopHarness", () => {
 
     const agentCall = vi.mocked(ToolLoopAgent).mock.calls[0]?.[0];
     expect(agentCall).toBeDefined();
-    expect(agentCall!.model).toBe("selected-model");
+    expect(agentCall!.model).toBe(selectedModel);
+    const prepareStep = getPrepareStep<unknown[], { providerOptions?: unknown }>(
+      agentCall!.prepareStep,
+    );
+    const prepared = await prepareStep({
+      context: undefined,
+      messages: [],
+      model: null,
+      stepNumber: 0,
+      steps: [],
+    });
+    expect(prepared.providerOptions).toEqual({ openai: { parallelToolCalls: false } });
     expect(dispatchDynamicModelEvent).toHaveBeenCalledTimes(1);
     expect(resolveModel).not.toHaveBeenCalled();
     expect(result.session.agent.modelReference).toEqual({
       contextWindowTokens: 200_000,
-      id: "selected-model",
-      providerOptions: { gateway: { order: ["openai"] } },
+      id: "openai/gpt-5",
+      providerOptions: { openai: { parallelToolCalls: false } },
     });
     expect(result.session.compaction.threshold).toBe(180_000);
   });
@@ -986,8 +1000,7 @@ describe("createToolLoopHarness", () => {
     });
     const session = createTestSession({
       agent: {
-        dynamicModelDefaultReference: { contextWindowTokens: 100_000, id: "fallback-model" },
-        modelReference: { contextWindowTokens: 100_000, id: "fallback-model" },
+        dynamicModel: true,
         system: "You are a test assistant.",
         tools: [{ description: "Adds numbers", name: "add", inputSchema: { type: "object" } }],
       },
@@ -1007,7 +1020,7 @@ describe("createToolLoopHarness", () => {
     expect(result.session.compaction.threshold).toBe(180_000);
   });
 
-  it("keeps the compaction threshold stable across steps with the same dynamic selection", async () => {
+  it("keeps the compaction threshold stable and fails when no dynamic selection remains", async () => {
     setupMockAgent({
       finishReason: "stop",
       response: { messages: [{ content: "Hello!", role: "assistant" }] },
@@ -1027,8 +1040,7 @@ describe("createToolLoopHarness", () => {
     });
     const session = createTestSession({
       agent: {
-        dynamicModelDefaultReference: { contextWindowTokens: 100_000, id: "fallback-model" },
-        modelReference: { contextWindowTokens: 100_000, id: "fallback-model" },
+        dynamicModel: true,
         system: "You are a test assistant.",
         tools: [{ description: "Adds numbers", name: "add", inputSchema: { type: "object" } }],
       },
@@ -1045,12 +1057,63 @@ describe("createToolLoopHarness", () => {
     expect(second.session.compaction.threshold).toBe(180_000);
 
     ctx.set(SessionDynamicModelReferenceKey, null);
-    const third = await contextStorage.run(ctx, () => runStep(second.session, { message: "Back" }));
-    expect(third.session.agent.modelReference).toEqual({
-      contextWindowTokens: 100_000,
-      id: "fallback-model",
+    await expect(
+      contextStorage.run(ctx, () => runStep(second.session, { message: "Back" })),
+    ).rejects.toThrow(/Dynamic model selection is required/);
+  });
+
+  it("emits a terminal failure when no dynamic model selection is active", async () => {
+    const { emit, events } = createEventCollector();
+    const runStep = createToolLoopHarness(createTestConfig("conversation", emit));
+    const session = createTestSession({
+      agent: {
+        dynamicModel: true,
+        system: "You are a test assistant.",
+        tools: [],
+      },
     });
-    expect(third.session.compaction.threshold).toBe(90_000);
+
+    const result = await contextStorage.run(new ContextContainer(), () =>
+      runStep(session, { message: "Hi" }),
+    );
+
+    expect(result.next).toEqual({ done: true, output: "" });
+    expect(events.map((event) => event.type)).toEqual([
+      "session.started",
+      "turn.started",
+      "message.received",
+      "step.failed",
+      "turn.failed",
+      "session.failed",
+    ]);
+    const turnFailed = events.find((event) => event.type === "turn.failed");
+    expect(turnFailed?.data.message).toContain("Dynamic model selection is required");
+    expect(ToolLoopAgent).not.toHaveBeenCalled();
+  });
+
+  it("emits a terminal failure when a turn-scoped dynamic model resolver throws", async () => {
+    const events: UnstampedMessageStreamEvent[] = [];
+    const emit: HarnessEmitFn = async (event) => {
+      events.push(event);
+      if (event.type === "turn.started") {
+        throw new DynamicModelSelectionError(new Error("flag service unavailable"));
+      }
+    };
+    const runStep = createToolLoopHarness(createTestConfig("conversation", emit));
+
+    const result = await runStep(createTestSession(), { message: "Hi" });
+
+    expect(result.next).toEqual({ done: true, output: "" });
+    expect(events.map((event) => event.type)).toEqual([
+      "session.started",
+      "turn.started",
+      "step.failed",
+      "turn.failed",
+      "session.failed",
+    ]);
+    const turnFailed = events.find((event) => event.type === "turn.failed");
+    expect(turnFailed?.data.message).toBe("flag service unavailable");
+    expect(ToolLoopAgent).not.toHaveBeenCalled();
   });
 
   it("keeps declared subagent tools visible in deeply nested sessions", async () => {
@@ -8003,9 +8066,9 @@ describe("createToolLoopHarness", () => {
       "session.started",
       "turn.started",
       "message.received",
+      "step.started",
       "compaction.requested",
       "compaction.completed",
-      "step.started",
       "message.completed",
       "step.completed",
       "turn.completed",
@@ -9163,7 +9226,6 @@ describe("createToolLoopHarness", () => {
             agentId: "weather-agent",
             agentName: "Weather Agent",
             eveVersion: "0.0.0",
-            modelId: "anthropic/claude-sonnet-4-5",
           },
           tools: new Map(),
         };
@@ -9198,7 +9260,6 @@ describe("createToolLoopHarness", () => {
           runtimeIdentity: {
             agentId: "weather-agent",
             eveVersion: "0.0.0",
-            modelId: "anthropic/claude-sonnet-4-5",
           },
           tools: new Map(),
         };
@@ -9234,7 +9295,6 @@ describe("createToolLoopHarness", () => {
             agentId: "my-agent",
             agentName: "My Agent",
             eveVersion: "0.0.0",
-            modelId: "anthropic/claude-sonnet-4-5",
           },
           tools: new Map(),
         };
@@ -9272,7 +9332,6 @@ describe("createToolLoopHarness", () => {
           agentId: "my-agent",
           agentName: "My Agent",
           eveVersion: "0.0.0",
-          modelId: "anthropic/claude-sonnet-4-5",
         },
         tools: new Map(),
       };
@@ -9360,7 +9419,6 @@ describe("createToolLoopHarness", () => {
             agentId: "weather-agent",
             agentName: "Weather Agent",
             eveVersion: "0.0.0",
-            modelId: "anthropic/claude-sonnet-4-5",
           },
           tools: new Map(),
         };
@@ -9724,7 +9782,7 @@ describe("createToolLoopHarness", () => {
         Object.fromEntries(Object.keys(agentCall?.runtimeContext ?? {}).map((key) => [key, true])),
       );
       expect(order.indexOf("turn.started")).toBeLessThan(order.indexOf('events["step.started"]'));
-      expect(order.indexOf('events["step.started"]')).toBeLessThan(order.indexOf("step.started"));
+      expect(order.indexOf("step.started")).toBeLessThan(order.indexOf('events["step.started"]'));
       expect(getCompatibilityEventTypes(events)).toContain("step.started");
     });
 

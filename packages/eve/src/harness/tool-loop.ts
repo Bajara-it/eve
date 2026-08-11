@@ -37,7 +37,10 @@ import {
   SessionCallbackKey,
 } from "#context/keys.js";
 import { buildDynamicInstructionMessages } from "#context/dynamic-instruction-lifecycle.js";
-import { getActiveDynamicModelSelection } from "#context/dynamic-model-lifecycle.js";
+import {
+  getActiveDynamicModelSelection,
+  isDynamicModelSelectionError,
+} from "#context/dynamic-model-lifecycle.js";
 import { buildDynamicTools } from "#context/build-dynamic-tools.js";
 import { buildDynamicSubagentTools } from "#context/dynamic-subagent-lifecycle.js";
 import { PendingSkillAnnouncementKey } from "#context/dynamic-skill-lifecycle.js";
@@ -50,7 +53,7 @@ import {
   createInputRequestedEvent,
   createResultCompletedEvent,
   createSessionWaitingEvent,
-  createStepStartedEvent,
+  type UnstampedMessageStreamEvent,
 } from "#protocol/message.js";
 import type { InstrumentationDefinition } from "#public/instrumentation/index.js";
 import { ASK_QUESTION_TOOL_NAME } from "#runtime/framework-tools/ask-question.js";
@@ -200,15 +203,16 @@ import {
 } from "#runtime/framework-tools/final-output.js";
 import type { RuntimeModelReference } from "#runtime/agent/bootstrap.js";
 import type { RunMode } from "#shared/run-mode.js";
-import type {
-  CompactionConfig,
-  HarnessSession,
-  HarnessToolMap,
-  SettledTurn,
-  StepFn,
-  StepInput,
-  StepResult,
-  ToolLoopHarnessConfig,
+import {
+  type CompactionConfig,
+  type HarnessSession,
+  type HarnessToolMap,
+  requireSessionModelReference,
+  type SettledTurn,
+  type StepFn,
+  type StepInput,
+  type StepResult,
+  type ToolLoopHarnessConfig,
 } from "#harness/types.js";
 
 /**
@@ -358,20 +362,28 @@ async function resolveActiveRuntimeModel(input: {
   readonly session: HarnessSession;
 }> {
   if (input.ctx === undefined) {
+    const reference = input.session.agent.modelReference;
+    if (reference === undefined) {
+      throw new Error("Dynamic model selection is unavailable outside an eve runtime context.");
+    }
     return {
-      model: await input.config.resolveModel(input.session.agent.modelReference),
+      model: await input.config.resolveModel(reference),
       session: input.session,
     };
   }
 
-  const fallback =
-    input.session.agent.dynamicModelDefaultReference ?? input.session.agent.modelReference;
   const selected = getActiveDynamicModelSelection(input.ctx);
 
   if (selected === null) {
+    const reference = input.session.agent.modelReference;
+    if (input.session.agent.dynamicModel === true || reference === undefined) {
+      throw new Error(
+        "Dynamic model selection is required before model-dependent work begins. Add a matching resolver handler that returns a concrete model.",
+      );
+    }
     return {
-      model: await input.config.resolveModel(fallback),
-      session: updateSessionModelReference(input.session, fallback),
+      model: await input.config.resolveModel(reference),
+      session: input.session,
     };
   }
 
@@ -388,9 +400,6 @@ function updateSessionModelReference(
   session: HarnessSession,
   modelReference: RuntimeModelReference,
 ): HarnessSession {
-  // Rescale from the reference the current threshold was computed against;
-  // rescaling from the static fallback would compound the threshold per step.
-  const priorReference = session.agent.modelReference;
   return {
     ...session,
     agent: {
@@ -400,7 +409,6 @@ function updateSessionModelReference(
     compaction: updateCompactionThresholdForModelReference({
       compaction: session.compaction,
       modelReference,
-      priorReference,
     }),
   };
 }
@@ -408,19 +416,19 @@ function updateSessionModelReference(
 function updateCompactionThresholdForModelReference(input: {
   readonly compaction: CompactionConfig;
   readonly modelReference: RuntimeModelReference;
-  readonly priorReference: RuntimeModelReference;
 }): CompactionConfig {
-  if (
-    input.modelReference.contextWindowTokens === undefined ||
-    input.priorReference.contextWindowTokens === undefined
-  ) {
+  if (input.modelReference.contextWindowTokens === undefined) {
     return input.compaction;
   }
 
-  const thresholdPercent = input.compaction.threshold / input.priorReference.contextWindowTokens;
   return {
     ...input.compaction,
-    threshold: Math.max(1, Math.floor(input.modelReference.contextWindowTokens * thresholdPercent)),
+    threshold: Math.max(
+      1,
+      Math.floor(
+        input.modelReference.contextWindowTokens * (input.compaction.thresholdPercent ?? 0.9),
+      ),
+    ),
   };
 }
 
@@ -576,6 +584,7 @@ export function createToolLoopHarness(config: ToolLoopHarnessConfig): StepFn {
     let emissionState = getHarnessEmissionState(session.state);
     const store = contextStorage.getStore();
     const parent = store?.get(ParentSessionKey);
+    const hasDelegatedCaller = parent !== undefined || store?.get(SessionCallbackKey) !== undefined;
     const emit = createInstrumentationHandleEvent({
       agentName: config.runtimeIdentity?.agentName,
       handleEvent: baseEmit,
@@ -586,6 +595,41 @@ export function createToolLoopHarness(config: ToolLoopHarnessConfig): StepFn {
       sessionId: session.sessionId,
       turnId: activeTurnId(emissionState),
     });
+    const failModelSelection = async (
+      error: unknown,
+      failureState: ReturnType<typeof getHarnessEmissionState>,
+    ): Promise<StepResult> => {
+      throwIfTurnAborted(config.abortSignal);
+      if (turnSpan) {
+        recordErrorOnSpan(turnSpan, error);
+      }
+      if (!emit) {
+        throw error;
+      }
+
+      const errorId = createErrorId();
+      const message = toErrorMessage(error);
+      log.error("model selection failed terminally", {
+        error,
+        errorId,
+        sessionId: session.sessionId,
+        turnId: failureState.turnId,
+      });
+      await emitFailedStep(emit, failureState, {
+        code: "MODEL_SELECTION_FAILED",
+        details: { errorId },
+        message,
+        sessionId: session.sessionId,
+      });
+
+      return {
+        next:
+          config.mode === "task" || hasDelegatedCaller
+            ? { done: true, isError: true, output: message }
+            : { done: true, output: "" },
+        session,
+      };
+    };
 
     if (config.clearOnly === true) {
       session = {
@@ -593,6 +637,7 @@ export function createToolLoopHarness(config: ToolLoopHarnessConfig): StepFn {
         compaction: {
           recentWindowSize: session.compaction.recentWindowSize,
           threshold: session.compaction.threshold,
+          thresholdPercent: session.compaction.thresholdPercent,
         },
         history: [],
       };
@@ -636,6 +681,7 @@ export function createToolLoopHarness(config: ToolLoopHarnessConfig): StepFn {
             compaction: {
               recentWindowSize: compacted.session.compaction.recentWindowSize,
               threshold: compacted.session.compaction.threshold,
+              thresholdPercent: compacted.session.compaction.thresholdPercent,
             },
             history: compacted.messages,
           };
@@ -692,12 +738,22 @@ export function createToolLoopHarness(config: ToolLoopHarnessConfig): StepFn {
     });
     if (pending.outcome === "unresolved") {
       if (emit && pending.deferredMessage === true && hasStepInput(input)) {
-        emissionState = await emitTurnPreamble(
-          emit,
-          preambleStepInput ?? {},
-          emissionState,
-          config.runtimeIdentity,
-        );
+        try {
+          emissionState = await emitTurnPreamble(
+            emit,
+            preambleStepInput ?? {},
+            emissionState,
+            config.runtimeIdentity,
+          );
+        } catch (error) {
+          if (!isDynamicModelSelectionError(error)) throw error;
+          return failModelSelection(error, {
+            sessionStarted: true,
+            sequence: emissionState.sequence,
+            stepIndex: 0,
+            turnId: `turn_${emissionState.sequence}`,
+          });
+        }
         emissionState = await emitTurnEpilogue(emit, emissionState, config.mode);
         return {
           next: null,
@@ -729,12 +785,22 @@ export function createToolLoopHarness(config: ToolLoopHarnessConfig): StepFn {
     // --- Turn preamble ------------------------------------------------------
 
     if (emit && hasStepInput(input)) {
-      emissionState = await emitTurnPreamble(
-        emit,
-        preambleStepInput ?? {},
-        emissionState,
-        config.runtimeIdentity,
-      );
+      try {
+        emissionState = await emitTurnPreamble(
+          emit,
+          preambleStepInput ?? {},
+          emissionState,
+          config.runtimeIdentity,
+        );
+      } catch (error) {
+        if (!isDynamicModelSelectionError(error)) throw error;
+        return failModelSelection(error, {
+          sessionStarted: true,
+          sequence: emissionState.sequence,
+          stepIndex: 0,
+          turnId: `turn_${emissionState.sequence}`,
+        });
+      }
       session = setHarnessEmissionState(session, emissionState);
 
       if (turnSpan) {
@@ -795,28 +861,42 @@ export function createToolLoopHarness(config: ToolLoopHarnessConfig): StepFn {
     // --- Model + tools ------------------------------------------------------
 
     // Direct harness unit tests may run without an ambient context.
-    const ctx = contextStorage.getStore();
-    const hasDelegatedCaller =
-      ctx?.get(ParentSessionKey) !== undefined || ctx?.get(SessionCallbackKey) !== undefined;
-    if (ctx !== undefined && config.dispatchDynamicModelEvent !== undefined) {
-      await config.dispatchDynamicModelEvent({
+    const ctx = store;
+    let resolvedModel: Awaited<ReturnType<typeof resolveActiveRuntimeModel>>;
+    try {
+      if (ctx !== undefined && config.dispatchDynamicModelEvent !== undefined) {
+        await config.dispatchDynamicModelEvent({
+          ctx,
+          event: {
+            data: {
+              sequence: emissionState.sequence,
+              stepIndex: emissionState.stepIndex,
+              turnId: emissionState.turnId,
+            },
+            type: "step.started",
+          } as UnstampedMessageStreamEvent,
+          messages,
+        });
+      }
+      resolvedModel = await resolveActiveRuntimeModel({
+        config,
         ctx,
-        event: createStepStartedEvent({
-          sequence: emissionState.sequence,
-          stepIndex: emissionState.stepIndex,
-          turnId: emissionState.turnId,
-        }),
-        fallback: session.agent.dynamicModelDefaultReference ?? session.agent.modelReference,
-        messages,
+        session,
       });
+    } catch (error) {
+      return failModelSelection(error, emissionState);
     }
-    const resolvedModel = await resolveActiveRuntimeModel({
-      config,
-      ctx,
-      session,
-    });
     session = resolvedModel.session;
     const model = resolvedModel.model;
+
+    if (emit) {
+      await emitStepStarted(
+        emit,
+        emissionState,
+        requireSessionModelReference(session).id,
+        messages,
+      );
+    }
     const cachePath = detectPromptCachePath(model);
     const marker = cachePath.kind === "anthropic-direct" ? getAnthropicCacheMarker() : undefined;
 
@@ -968,7 +1048,7 @@ export function createToolLoopHarness(config: ToolLoopHarnessConfig): StepFn {
         approvedTools,
         capabilities: config.capabilities,
         disabledProviderTools: opts.disabledProviderTools,
-        modelReference: session.agent.modelReference,
+        modelReference: requireSessionModelReference(session),
         tools: advertisedHarnessTools,
         webSearchProvider: config.webSearchProvider,
       });
@@ -1203,15 +1283,9 @@ export function createToolLoopHarness(config: ToolLoopHarnessConfig): StepFn {
         config.abortSignal,
       );
 
-    // Resolve first-attempt instrumentation before step.started dispatch
-    // allows dynamic tool resolvers to update the effective toolset.
+    // Resolve first-attempt instrumentation after step.started dynamic
+    // capabilities have updated the effective prompt and toolset.
     const initialModelCallInput = prepareModelCallInput();
-
-    // Emit step.started before building the toolset so dynamic tool
-    // resolvers subscribed to step.started write to LiveStepToolsKey.
-    if (emit) {
-      await emitStepStarted(emit, emissionState, messages);
-    }
 
     // Workflow continuations replay the sandbox after step.started so nested
     // action lifecycle events keep the active turn's emission coordinates.
@@ -2602,9 +2676,11 @@ function createNextCompactionConfig(
     lastKnownPromptMessageCount?: number;
     recentWindowSize: number;
     threshold: number;
+    thresholdPercent?: number;
   } = {
     recentWindowSize: current.recentWindowSize,
     threshold: current.threshold,
+    thresholdPercent: current.thresholdPercent,
   };
 
   if (result.usage?.inputTokens !== undefined) {
@@ -2648,7 +2724,7 @@ async function maybeCompact(input: {
   const compaction = await resolveCompactionModel({
     compactionModelReference: session.agent.compactionModelReference,
     model: input.model,
-    modelReference: session.agent.modelReference,
+    modelReference: requireSessionModelReference(session),
     resolveModel: input.resolveModel,
   });
 
