@@ -3,7 +3,7 @@ import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { get, head, put } from "@vercel/blob";
+import { get, put } from "@vercel/blob";
 
 import {
   SHA_PATTERN,
@@ -20,7 +20,7 @@ const packageJsonPath = join(packageRoot, "package.json");
 const artifactDirectory = join(appRoot, ".artifacts");
 const sourceSha = process.env.VERCEL_GIT_COMMIT_SHA;
 const branch = process.env.VERCEL_GIT_COMMIT_REF;
-const baseUrl = process.env.EVE_PACKAGE_BASE_URL;
+const productionDomain = process.env.VERCEL_PROJECT_PRODUCTION_URL;
 
 if (!SHA_PATTERN.test(sourceSha ?? "")) {
   throw new Error("VERCEL_GIT_COMMIT_SHA must be a 40-character Git commit SHA.");
@@ -34,15 +34,15 @@ if (branch !== "main" || process.env.VERCEL_ENV !== "production") {
   process.exit(0);
 }
 
-if (typeof baseUrl !== "string" || baseUrl.length === 0) {
-  throw new Error("EVE_PACKAGE_BASE_URL is required for package publishing.");
+if (typeof productionDomain !== "string" || productionDomain.length === 0) {
+  throw new Error("VERCEL_PROJECT_PRODUCTION_URL is required for package publishing.");
 }
 
 const originalPackageJson = await readFile(packageJsonPath, "utf8");
 const preparedPackageJson = preparePackageJson(JSON.parse(originalPackageJson), sourceSha);
 const version = preparedPackageJson.version;
 // Generated projects pin this deployment's immutable SHA route, never the moving main route.
-const dependencyUrl = packageDependencyUrl(baseUrl, sourceSha);
+const dependencyUrl = packageDependencyUrl(`https://${productionDomain}`, sourceSha);
 const artifactPath = packageArtifactPath(sourceSha);
 
 try {
@@ -53,10 +53,9 @@ try {
     EVE_MAIN_DEPENDENCY_URL: dependencyUrl,
   });
   const sha256 = createHash("sha256").update(tarball).digest("hex");
-  let artifact;
   try {
-    artifact = await put(artifactPath, tarball, {
-      access: "public",
+    await put(artifactPath, tarball, {
+      access: "private",
       addRandomSuffix: false,
       allowOverwrite: false,
       cacheControlMaxAge: 31_536_000,
@@ -65,25 +64,24 @@ try {
   } catch (error) {
     // Redeploys are valid only when this commit still produces identical package bytes.
     if (!(error instanceof Error) || !error.message.includes("already exists")) throw error;
-    artifact = await head(artifactPath);
-    const publishedTarball = await fetch(artifact.url);
-    if (!publishedTarball.ok) {
-      throw new Error(`Published package artifact returned ${publishedTarball.status}.`);
+    const publishedArtifact = await get(artifactPath, { access: "private", useCache: false });
+    if (publishedArtifact === null) {
+      throw new Error("Published package artifact could not be read.");
     }
     const publishedSha256 = createHash("sha256")
-      .update(Buffer.from(await publishedTarball.arrayBuffer()))
+      .update(Buffer.from(await new Response(publishedArtifact.stream).arrayBuffer()))
       .digest("hex");
     if (publishedSha256 !== sha256) {
       throw new Error(`Commit ${sourceSha} was already published with different package contents.`);
     }
   }
 
-  const manifest = { sourceSha, version, tarball: artifact.url, sha256 };
+  const manifest = { sourceSha, version, tarball: dependencyUrl, sha256 };
   const manifestPath = packageManifestPath(sourceSha);
-  const existingManifest = await get(manifestPath, { access: "public" });
+  const existingManifest = await get(manifestPath, { access: "private", useCache: false });
   if (existingManifest === null) {
     await put(manifestPath, JSON.stringify(manifest), {
-      access: "public",
+      access: "private",
       addRandomSuffix: false,
       allowOverwrite: false,
       cacheControlMaxAge: 31_536_000,
