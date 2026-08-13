@@ -1,9 +1,9 @@
 ---
-title: "agent.ts"
-description: "Set the agent's runtime config in agent.ts with defineAgent, including the model, reasoning effort, and compaction."
+title: "Agents"
+description: "Configure an eve agent's model, reasoning effort, compaction, limits, and runtime behavior in agent.ts."
 ---
 
-An agent's `agent.ts` calls `defineAgent` (from `eve`) to set its runtime config.
+An eve app has one root agent assembled from the files under `agent/`. Its optional `agent.ts` calls `defineAgent` (from `eve`) when you need to configure the model or other runtime behavior. Declared [subagents](./subagents) have their own `agent.ts` and capabilities; this page covers the configuration shared by root agents and subagents.
 
 ## Set the model
 
@@ -229,7 +229,7 @@ installed package must stay external in hosted output, list it in
 
 ## Other defineAgent fields
 
-`defineAgent` takes a few more fields, all optional. For the exported types, see the [TypeScript API](./reference/typescript-api).
+`defineAgent` takes a few more fields, all optional. For the exported types, see the [TypeScript API Reference](./reference/typescript-api).
 
 | Field          | Type                                    | Default          | Description                                                                                                                                                                                                   |
 | -------------- | --------------------------------------- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -257,5 +257,5 @@ During `eve dev`, ordinary dependencies are bundled into each retained runtime g
 ## What to read next
 
 - [Default harness](./concepts/default-harness) for the loop and built-in tools this config drives
-- [TypeScript API](./reference/typescript-api) for every `defineAgent` field and type
+- [TypeScript API Reference](./reference/typescript-api) for every `defineAgent` field and type
 - [Subagents](./subagents) for the `description` requirement and child-agent config
