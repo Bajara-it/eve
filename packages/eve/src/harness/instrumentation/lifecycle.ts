@@ -1,5 +1,6 @@
 import { createInstrumentationDispatcher } from "#harness/instrumentation/dispatch.js";
 import type { InstrumentationStateSlot } from "#harness/instrumentation/state.js";
+import type { RuntimeTraceContext } from "#protocol/message.js";
 
 /**
  * Stable eve identity for one actual model attempt.
@@ -285,11 +286,7 @@ export interface InstrumentationSessionStartedEvent {
   readonly sessionId: string;
 }
 
-export interface InstrumentationTraceContext {
-  readonly spanId: string;
-  readonly traceFlags: number;
-  readonly traceId: string;
-}
+export type InstrumentationTraceContext = RuntimeTraceContext;
 
 /**
  * Which tool call dispatched a subagent child. The trace structure alone

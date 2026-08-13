@@ -9,11 +9,7 @@ import {
   trace,
 } from "#compiled/@opentelemetry/api/index.js";
 
-import {
-  SESSION_WINDOW_TURN_LIMIT,
-  type AgentSessionTraceState,
-  type AgentTraceStateStore,
-} from "#tracing/agent-trace-state.js";
+import type { AgentTraceStateStore } from "#tracing/agent-trace-state.js";
 import {
   contentAttribute,
   genAiInputMessagesAttribute,
@@ -30,6 +26,7 @@ import { createAgentApprovalInstrumentation } from "#tracing/agent-approval-inst
 import { createAgentChannelDeliveryInstrumentation } from "#tracing/agent-channel-delivery-instrumentation.js";
 import { createAgentToolInstrumentation } from "#tracing/agent-tool-instrumentation.js";
 import { setAgentUsage } from "#tracing/agent-otel-usage.js";
+import { createAgentOtelSessionContext } from "#tracing/agent-otel-session-context.js";
 import type {
   InstrumentationStepAttemptMetadataEvent,
   InstrumentationAttemptScope,
@@ -46,7 +43,6 @@ import type {
   InstrumentationTurnStartedEvent,
   InstrumentationTurnTerminalEvent,
 } from "#harness/instrumentation/lifecycle.js";
-import { sessionIdempotencyKey } from "#harness/instrumentation/lifecycle.js";
 
 interface SpanState {
   readonly context: Context;
@@ -76,6 +72,12 @@ export interface AgentOtelInstrumentationInput {
 /** OTel event definition and its trusted framework context runner. */
 export interface AgentOtelInstrumentation {
   readonly hook: InstrumentationProviderDefinition;
+  readonly prepareSessionTrace: (
+    event: InstrumentationSessionStartedEvent,
+  ) => Promise<InstrumentationTraceContext>;
+  readonly prepareTurnTrace: (
+    event: InstrumentationTurnStartedEvent,
+  ) => Promise<InstrumentationTraceContext>;
   readonly runInContext: InstrumentationContextRunner;
 }
 
@@ -128,46 +130,15 @@ export function createAgentOtelInstrumentation(
     },
     tracer: input.tracer,
   });
+  const { ensureSessionContext, prepareSessionTrace, prepareTurnTrace } =
+    createAgentOtelSessionContext(input);
 
   const onSessionStarted = async (event: InstrumentationSessionStartedEvent): Promise<void> => {
-    await ensureSessionContext(event);
+    await prepareSessionTrace(event);
   };
 
   const onTurnStarted = async (event: InstrumentationTurnStartedEvent): Promise<void> => {
-    const session = advanceSessionWindow(
-      event.sessionId,
-      await ensureSessionContext({
-        agentName: undefined,
-        channelKind: undefined,
-        idempotencyKey: sessionIdempotencyKey(event.sessionId),
-        parentTraceContext: event.parentTraceContext,
-        rootSessionId: event.rootSessionId,
-        sessionId: event.sessionId,
-        type: "session.started",
-      }),
-    );
-    // The turn outlives this worker, so no live span can cover it: the span
-    // id is allocated now for descendants to parent through, and the span
-    // itself is emitted at the turn's session transition.
-    const turnContext: SpanContext = {
-      isRemote: false,
-      spanId: input.idGenerator.deriveSpanId(`turn:${event.idempotencyKey}`),
-      traceFlags: session.context.traceFlags,
-      traceId: session.context.traceId,
-    };
-    await input.stateStore.setSession(event.sessionId, {
-      ...session,
-      turnsInWindow: session.turnsInWindow + 1,
-    });
-    await input.stateStore.setTurn(event.sessionId, event.turnId, {
-      context: turnContext,
-      lineage: event.parentLineage,
-      parentIsRemote: session.context.isRemote,
-      parentSpanId: session.context.spanId,
-      rootSessionId: event.rootSessionId,
-      sequence: event.sequence,
-      startTimeMs: Date.now(),
-    });
+    await prepareTurnTrace(event);
   };
 
   const onStepStarted = async (event: InstrumentationStepAttemptStartedEvent): Promise<void> => {
@@ -423,62 +394,6 @@ export function createAgentOtelInstrumentation(
     state.span.end();
   };
 
-  const openSessionWindow = (window: {
-    readonly agentName?: string;
-    readonly index: number;
-    readonly previousTraceId?: string;
-    readonly rootSessionId: string;
-    readonly sessionId: string;
-  }): SpanContext => {
-    const span = input.tracer.startSpan("agent.session", {
-      attributes: {
-        "agent.framework.name": "eve",
-        "agent.framework.version": input.frameworkVersion,
-        "agent.name": window.agentName,
-        "agent.root.session.id": window.rootSessionId,
-        "agent.session.id": window.sessionId,
-        "agent.session.window": window.index,
-        "agent.trace.schema.version": 1,
-        ...(window.previousTraceId === undefined
-          ? {}
-          : { "agent.session.window.previous.trace.id": window.previousTraceId }),
-      },
-      root: true,
-    });
-    span.addEvent(window.index === 0 ? "session.started" : "session.window.opened");
-    // The window outlives this worker and has no guaranteed close — an idle
-    // session never ends — so the root is recorded as a zero-duration marker
-    // and later spans parent through its persisted context.
-    span.end();
-    return span.spanContext();
-  };
-
-  const ensureSessionContext = async (
-    event: InstrumentationSessionStartedEvent,
-  ): Promise<AgentSessionTraceState> => {
-    let state = await input.stateStore.getSession(event.sessionId);
-    if (state === undefined) {
-      state = {
-        agentName: event.agentName,
-        channelKind: event.channelKind,
-        context:
-          event.parentTraceContext === undefined
-            ? openSessionWindow({
-                agentName: event.agentName,
-                index: 0,
-                rootSessionId: event.rootSessionId,
-                sessionId: event.sessionId,
-              })
-            : adoptedSpanContext(event.parentTraceContext),
-        rootSessionId: event.rootSessionId,
-        turnsInWindow: 0,
-        window: 0,
-      };
-      await input.stateStore.setSession(event.sessionId, state);
-    }
-    return state;
-  };
-
   const channelDeliveries = createAgentChannelDeliveryInstrumentation({
     ensureSessionContext,
     frameworkVersion: input.frameworkVersion,
@@ -487,26 +402,6 @@ export function createAgentOtelInstrumentation(
     stateStore: input.stateStore,
     tracer: input.tracer,
   });
-
-  const advanceSessionWindow = (
-    sessionId: string,
-    session: AgentSessionTraceState,
-  ): AgentSessionTraceState => {
-    if (session.turnsInWindow < SESSION_WINDOW_TURN_LIMIT) return session;
-    const index = session.window + 1;
-    return {
-      ...session,
-      context: openSessionWindow({
-        agentName: session.agentName,
-        index,
-        previousTraceId: session.context.traceId,
-        rootSessionId: session.rootSessionId,
-        sessionId,
-      }),
-      turnsInWindow: 0,
-      window: index,
-    };
-  };
 
   const onStepMetadata = (event: InstrumentationStepAttemptMetadataEvent): void => {
     const attempt = steps.get(event.scope);
@@ -555,6 +450,8 @@ export function createAgentOtelInstrumentation(
       },
       name: "eve.otel",
     },
+    prepareSessionTrace,
+    prepareTurnTrace,
     runInContext(operation, execute) {
       const scope = attemptScopes.get(operation.scope.attemptId) ?? operation.scope;
       const contexts = executionContexts.get(scope);
@@ -622,15 +519,6 @@ function parentLineageAttributes(
     attributes["agent.subagent.name"] = lineage.subagentName;
   }
   return attributes;
-}
-
-function adoptedSpanContext(handed: InstrumentationTraceContext): SpanContext {
-  return {
-    isRemote: "isRemote" in handed && handed.isRemote === true,
-    spanId: handed.spanId,
-    traceFlags: handed.traceFlags,
-    traceId: handed.traceId,
-  };
 }
 
 function contextFromSpanContext(spanContext: SpanContext): Context {

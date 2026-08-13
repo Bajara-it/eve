@@ -61,6 +61,7 @@ import {
   createSessionWaitingEvent,
   type UnstampedMessageStreamEvent,
 } from "#protocol/message.js";
+import type { RuntimeTraceContext } from "#protocol/message.js";
 import { ASK_QUESTION_TOOL_NAME } from "#runtime/framework-tools/ask-question.js";
 import { resolveAgentsAnnouncement } from "#harness/handles/prompt.js";
 import { getAgentHandleStore } from "#harness/handles/store.js";
@@ -140,6 +141,7 @@ import {
 import type { InstrumentationAttemptScope } from "#harness/instrumentation/lifecycle.js";
 import { attemptIdempotencyKey } from "#harness/instrumentation/lifecycle.js";
 import { resolveParentLineage } from "#harness/parent-lineage.js";
+import { prepareTurnTraceContext } from "#harness/prepare-trace-context.js";
 import { ChannelKey } from "#runtime/sessions/runtime-context-keys.js";
 import {
   consumeDeferredStepInput,
@@ -617,6 +619,8 @@ export function createToolLoopHarness(config: ToolLoopHarnessConfig): StepFn {
     const store = contextStorage.getStore();
     const parent = store?.get(ParentSessionKey);
     const hasDelegatedCaller = parent !== undefined || store?.get(SessionCallbackKey) !== undefined;
+    const parentLineage = resolveParentLineage(parent, store?.get(ChannelKey));
+    const parentTraceContext = store?.get(ParentTraceContextKey);
     let activeAttemptScope: InstrumentationAttemptScope | undefined;
     const emit = createInstrumentationHandleEvent({
       agentName: config.runtimeIdentity?.agentName,
@@ -624,8 +628,8 @@ export function createToolLoopHarness(config: ToolLoopHarnessConfig): StepFn {
       getAttemptScope: () => activeAttemptScope,
       handleEvent: baseEmit,
       hooks: config.instrumentation?.hooks,
-      parentLineage: resolveParentLineage(parent, store?.get(ChannelKey)),
-      parentTraceContext: store?.get(ParentTraceContextKey),
+      parentLineage,
+      parentTraceContext,
       rootSessionId: parent?.rootSessionId,
       sessionId: session.sessionId,
       turnId: activeTurnId(emissionState),
@@ -664,6 +668,29 @@ export function createToolLoopHarness(config: ToolLoopHarnessConfig): StepFn {
             : { done: true, output: "" },
         session,
       };
+    };
+    const preparePreambleTrace = async (): Promise<RuntimeTraceContext | undefined> => {
+      const spanContext = turnSpan?.spanContext();
+      const authoredTraceContext =
+        spanContext !== undefined && isValidSpanContext(spanContext)
+          ? {
+              spanId: spanContext.spanId,
+              traceFlags: spanContext.traceFlags,
+              traceId: spanContext.traceId,
+            }
+          : undefined;
+      return await prepareTurnTraceContext({
+        agentName: config.runtimeIdentity?.agentName,
+        instrumentation: config.instrumentation,
+        parentLineage,
+        parentTraceContext,
+        rootSessionId: parent?.rootSessionId ?? session.rootSessionId ?? session.sessionId,
+        sequence: emissionState.sequence,
+        sessionId: session.sessionId,
+        sessionStarted: emissionState.sessionStarted,
+        traceContext: authoredTraceContext,
+        turnId: `turn_${emissionState.sequence}`,
+      });
     };
 
     if (config.clearOnly === true) {
@@ -932,11 +959,13 @@ export function createToolLoopHarness(config: ToolLoopHarnessConfig): StepFn {
         hasStepInput(input)
       ) {
         try {
+          const traceContext = await preparePreambleTrace();
           emissionState = await emitTurnPreamble(
             emit,
             preambleStepInput ?? {},
             emissionState,
             config.runtimeIdentity,
+            traceContext,
           );
         } catch (error) {
           if (!isDynamicModelSelectionError(error)) throw error;
@@ -991,11 +1020,13 @@ export function createToolLoopHarness(config: ToolLoopHarnessConfig): StepFn {
 
     if (emit && hasStepInput(input)) {
       try {
+        const traceContext = await preparePreambleTrace();
         emissionState = await emitTurnPreamble(
           emit,
           preambleStepInput ?? {},
           emissionState,
           config.runtimeIdentity,
+          traceContext,
         );
       } catch (error) {
         if (!isDynamicModelSelectionError(error)) throw error;
@@ -1784,6 +1815,15 @@ export function createToolLoopHarness(config: ToolLoopHarnessConfig): StepFn {
   }
 
   return runStep;
+}
+
+function isValidSpanContext(spanContext: SpanContext): boolean {
+  return (
+    /^[0-9a-f]{32}$/u.test(spanContext.traceId) &&
+    spanContext.traceId !== "00000000000000000000000000000000" &&
+    /^[0-9a-f]{16}$/u.test(spanContext.spanId) &&
+    spanContext.spanId !== "0000000000000000"
+  );
 }
 
 function extractTokenUsageDelta(input: {
