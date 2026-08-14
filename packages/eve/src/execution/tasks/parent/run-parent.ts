@@ -1,40 +1,42 @@
-import {
-  EntityConflictError,
-  HookNotFoundError,
-  RunExpiredError,
-  WorkflowRunNotFoundError,
-} from "#compiled/@workflow/errors/index.js";
-
-import type { TaskRunWorkflowInput } from "#execution/tasks/run-task-workflow.js";
+import type { TaskRunWorkflowInput } from "#execution/tasks/child/workflow.js";
+import { isTaskWorkflowTargetGone } from "#execution/tasks/workflow-target.js";
 import {
   startWorkflowPreferLatest,
   taskRunWorkflowReference,
+  waitForCommandHookOwner,
 } from "#execution/workflow-runtime.js";
 import { getRun, resumeHook } from "#internal/workflow/runtime.js";
-import { walkCauseChain } from "#shared/errors.js";
 import {
-  TASK_SNAPSHOT_STREAM_NAMESPACE,
-  isReadyTaskStatus,
+  TASK_VIEW_STREAM_NAMESPACE,
   type TaskCommand,
   type TaskCommandHookPayload,
   type TaskRunInboundPayload,
   type TaskView,
 } from "#tasks/types.js";
 
-const TASK_SNAPSHOT_READ_TIMEOUT_MS = 10_000;
+const TASK_VIEW_READ_TIMEOUT_MS = 10_000;
 
 /**
- * Node-side controls for durable task runs. Every export must be called
- * from inside a `"use step"` body; none of these are steps themselves so
- * dispatch and tool steps can compose them inside one durable boundary.
+ * Node-side controls for durable task runs — the generic transport layer.
+ * This module only speaks `TaskCommand`/`TaskView`; it knows nothing about
+ * subagents, receipts, or the session index. Caller-specific policy (e.g.
+ * subagent delegation in `delegate.ts`) composes these primitives.
+ *
+ * Every export must be called from inside a `"use step"` body; none of
+ * these are steps themselves so dispatch and tool steps can compose them
+ * inside one durable boundary.
  */
 
 /** Starts the durable run owning one task's lifecycle. */
-export async function startTaskRun(
-  input: TaskRunWorkflowInput,
-): Promise<{ readonly runId: string }> {
-  const run = await startWorkflowPreferLatest(taskRunWorkflowReference, [input]);
-  return { runId: run.runId };
+export async function startTaskRun(input: TaskRunWorkflowInput): Promise<void> {
+  await startWorkflowPreferLatest(taskRunWorkflowReference, [input]);
+}
+
+/** Resolves the task run that won ownership of one replay-stable command token. */
+export async function waitForTaskCommandOwner(input: {
+  readonly taskInboxToken: string;
+}): Promise<{ readonly runId: string }> {
+  return await waitForCommandHookOwner(input.taskInboxToken);
 }
 
 /**
@@ -42,14 +44,14 @@ export async function startTaskRun(
  *
  * `unreachable` means the hook is not resumable — either the run
  * already finished and disposed it (the task is terminal; read the
- * final snapshot) or, right after creation, the freshly started run has
+ * final view) or, right after creation, the freshly started run has
  * not registered it yet. Senders racing that startup window pass
  * `retryUnreachable`; senders addressing an established task treat
  * `unreachable` as the terminal signal.
  */
 export async function sendTaskCommand(input: {
   readonly command: TaskCommand;
-  readonly continuationToken: string;
+  readonly taskInboxToken: string;
   readonly retryUnreachable?: { readonly attempts: number; readonly delayMs: number };
 }): Promise<"delivered" | "unreachable"> {
   return (await sendTaskCommandToOwner(input)) === undefined ? "unreachable" : "delivered";
@@ -58,27 +60,25 @@ export async function sendTaskCommand(input: {
 /** Delivers one command and returns the accepting task workflow's run id. */
 export async function sendTaskCommandToOwner(input: {
   readonly command: TaskCommand;
-  readonly continuationToken: string;
+  readonly taskInboxToken: string;
   readonly retryUnreachable?: { readonly attempts: number; readonly delayMs: number };
 }): Promise<{ readonly runId: string } | undefined> {
   const payload: TaskCommandHookPayload = { command: input.command, kind: "task-command" };
   const attempts = Math.max(1, input.retryUnreachable?.attempts ?? 1);
   for (let attempt = 0; ; attempt += 1) {
     try {
-      const owner = await resumeHook(input.continuationToken, payload);
+      const owner = await resumeHook(input.taskInboxToken, payload);
       if (
         typeof owner !== "object" ||
         owner === null ||
         !("runId" in owner) ||
         typeof owner.runId !== "string"
       ) {
-        throw new Error(
-          `Task continuation hook "${input.continuationToken}" returned no owner run id.`,
-        );
+        throw new Error(`Task inbox hook "${input.taskInboxToken}" returned no owner run id.`);
       }
       return { runId: owner.runId };
     } catch (error) {
-      if (!isFinishedTaskRunTarget(error)) {
+      if (!isTaskWorkflowTargetGone(error)) {
         throw error;
       }
       if (attempt + 1 >= attempts) {
@@ -98,14 +98,14 @@ export async function sendTaskCommandToOwner(input: {
  * hook, so the payload is stale by definition.
  */
 export async function sendTaskInboundPayload(input: {
-  readonly continuationToken: string;
+  readonly taskInboxToken: string;
   readonly payload: TaskRunInboundPayload;
 }): Promise<"delivered" | "unreachable"> {
   try {
-    await resumeHook(input.continuationToken, input.payload);
+    await resumeHook(input.taskInboxToken, input.payload);
     return "delivered";
   } catch (error) {
-    if (!isFinishedTaskRunTarget(error)) {
+    if (!isTaskWorkflowTargetGone(error)) {
       throw error;
     }
     return "unreachable";
@@ -113,18 +113,18 @@ export async function sendTaskInboundPayload(input: {
 }
 
 /**
- * Reads the latest snapshot a task run has published, or `undefined`
- * when the run has not committed its first snapshot yet (the caller
+ * Reads the latest view a task run has published, or `undefined`
+ * when the run has not committed its first view yet (the caller
  * already holds the creation receipt, which is `working`).
  *
- * Snapshots are trusted without re-validation: the task run is the
+ * Views are trusted without re-validation: the task run is the
  * single writer and every write passed the transition function.
  */
-export async function readLatestTaskSnapshot(input: {
+export async function readLatestTaskView(input: {
   readonly taskRunId: string;
 }): Promise<TaskView | undefined> {
   const stream = getRun<unknown>(input.taskRunId).getReadable<TaskView>({
-    namespace: TASK_SNAPSHOT_STREAM_NAMESPACE,
+    namespace: TASK_VIEW_STREAM_NAMESPACE,
     startIndex: -1,
   });
   const tailIndex = await stream.getTailIndex();
@@ -133,45 +133,10 @@ export async function readLatestTaskSnapshot(input: {
     if (tailIndex < 0) {
       return undefined;
     }
-    const result = await readWithTimeout(reader, "latest task snapshot");
+    const result = await readWithTimeout(reader, "latest task view");
     return result;
   } finally {
-    await reader.cancel("eve task snapshot read complete").catch(() => {});
-    reader.releaseLock();
-  }
-}
-
-/**
- * Waits until a task run publishes a ready snapshot — terminal or
- * `input_required` — starting from the latest published state. Returns
- * immediately when the task is already ready.
- *
- * Unlike {@link readLatestTaskSnapshot} this read has no timeout; the
- * caller owns cancellation by racing this promise (for example against
- * turn cancellation) and abandoning it.
- */
-export async function waitForReadyTaskSnapshot(input: {
-  readonly taskRunId: string;
-}): Promise<TaskView> {
-  const stream = getRun<unknown>(input.taskRunId).getReadable<TaskView>({
-    namespace: TASK_SNAPSHOT_STREAM_NAMESPACE,
-    startIndex: -1,
-  });
-  const reader = stream.getReader();
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done || value === undefined) {
-        throw new Error(
-          `Task run "${input.taskRunId}" closed its snapshot stream without a ready snapshot.`,
-        );
-      }
-      if (isReadyTaskStatus(value.status)) {
-        return value;
-      }
-    }
-  } finally {
-    await reader.cancel("eve task snapshot wait complete").catch(() => {});
+    await reader.cancel("eve task view read complete").catch(() => {});
     reader.releaseLock();
   }
 }
@@ -185,11 +150,11 @@ async function readWithTimeout(
     const result = await Promise.race([
       reader.read().then((read) => ({ kind: "read" as const, read })),
       new Promise<{ readonly kind: "timeout" }>((resolve) => {
-        timeout = setTimeout(() => resolve({ kind: "timeout" }), TASK_SNAPSHOT_READ_TIMEOUT_MS);
+        timeout = setTimeout(() => resolve({ kind: "timeout" }), TASK_VIEW_READ_TIMEOUT_MS);
       }),
     ]);
     if (result.kind === "timeout") {
-      throw new Error(`Timed out reading ${what} after ${TASK_SNAPSHOT_READ_TIMEOUT_MS}ms.`);
+      throw new Error(`Timed out reading ${what} after ${TASK_VIEW_READ_TIMEOUT_MS}ms.`);
     }
     if (result.read.done) {
       return undefined;
@@ -200,18 +165,4 @@ async function readWithTimeout(
       clearTimeout(timeout);
     }
   }
-}
-
-export function isFinishedTaskRunTarget(error: unknown): boolean {
-  for (const candidate of walkCauseChain(error)) {
-    if (
-      HookNotFoundError.is(candidate) ||
-      WorkflowRunNotFoundError.is(candidate) ||
-      RunExpiredError.is(candidate) ||
-      EntityConflictError.is(candidate)
-    ) {
-      return true;
-    }
-  }
-  return false;
 }

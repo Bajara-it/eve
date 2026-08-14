@@ -142,7 +142,7 @@ export interface TurnCaller {
   readonly taskId?: string;
   readonly replyTo:
     | { readonly kind: "hook"; readonly token: string }
-    | { readonly kind: "callback"; readonly url: string };
+    | { readonly kind: "callback"; readonly token: string; readonly url: string };
 }
 
 /**
@@ -174,8 +174,8 @@ export interface DeliverPayload {
       readonly hookPayload: SubagentAuthorizationEventHookPayload;
       readonly taskId: string;
     }[];
-    /** Terminal snapshots cached before task-run retention expires. */
-    readonly snapshots?: readonly TaskView[];
+    /** Terminal views cached before task-run retention expires. */
+    readonly views?: readonly TaskView[];
   };
   readonly [key: string]: unknown;
 }

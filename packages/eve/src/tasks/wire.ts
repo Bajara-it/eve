@@ -1,5 +1,5 @@
 import type { TaskCommand, TaskRunInboundPayload, TaskUsage } from "#tasks/types.js";
-import { TASK_AUTHORIZATION_REQUEST_ID, readTaskUsage } from "#tasks/types.js";
+import { readTaskUsage, taskAuthorizationRequestId } from "#tasks/types.js";
 
 /**
  * Translates one inbound hook payload into a lifecycle command.
@@ -16,7 +16,7 @@ import { TASK_AUTHORIZATION_REQUEST_ID, readTaskUsage } from "#tasks/types.js";
  * - `authorization.required` also blocks the task (the child cannot
  *   proceed without the parent's user) under a reserved request id, and
  *   `authorization.completed` clears exactly that id. Authorization
- *   payloads never enter the snapshot — only the fact that the child is
+ *   payloads never enter the view — only the fact that the child is
  *   blocked does.
  *
  * `input-response` is deliberately absent: the run must forward the
@@ -36,7 +36,7 @@ export function translateTaskInboundPayload(
       if (result === undefined) return undefined;
       if (result.outcome !== undefined) {
         // Usage retention: the settled outcome's `usageDelta` survives into
-        // the terminal command so the snapshot keeps the child's spend.
+        // the terminal command so the view keeps the child's spend.
         const usage = readTaskUsage(result.outcome.usageDelta);
         switch (result.outcome.result.kind) {
           case "succeeded":
@@ -64,15 +64,12 @@ export function translateTaskInboundPayload(
         kind: "start-turn",
         taskId: payload.taskId,
       };
-    case "authorization-event":
+    case "authorization-event": {
+      const requestId = taskAuthorizationRequestId(payload.event);
       return payload.event.type === "authorization.required"
-        ? {
-            inputRequests: [
-              { blockedOn: "authorization", requestId: TASK_AUTHORIZATION_REQUEST_ID },
-            ],
-            kind: "require-input",
-          }
-        : { kind: "answered", requestIds: [TASK_AUTHORIZATION_REQUEST_ID] };
+        ? { kind: "require-authorization", requestId }
+        : { kind: "answered", requestIds: [requestId] };
+    }
     default:
       return undefined;
   }

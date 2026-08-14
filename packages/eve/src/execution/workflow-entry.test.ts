@@ -58,15 +58,23 @@ vi.mock("./create-session-step.js", () => ({
 }));
 
 vi.mock("./route-child-delivery.js", () => ({
-  routeDeliverToChildren: vi.fn().mockImplementation(async ({ delivery, sessionState }) => ({
-    kind: "continue",
-    remainder: delivery,
-    sessionState,
-  })),
+  routeDeliverToChildren: vi
+    .fn()
+    .mockImplementation(async ({ delivery, serializedContext = {}, sessionState }) => ({
+      kind: "continue",
+      remainder: delivery,
+      serializedContext,
+      sessionState,
+    })),
 }));
 
 vi.mock("./delegated-parent-notification.js", () => ({
+  bindTurnCallerContextStep: vi
+    .fn()
+    .mockImplementation(async ({ serializedContext }) => serializedContext),
+  notifyCancelledTaskCallerStep: vi.fn().mockResolvedValue(undefined),
   notifyDelegatedParentStep: vi.fn().mockResolvedValue(undefined),
+  notifyTaskTurnStartedStep: vi.fn().mockResolvedValue(undefined),
   notifyTurnCallerStep: vi.fn().mockResolvedValue(undefined),
   resolveInitialTurnCallerStep: vi.fn().mockResolvedValue(undefined),
 }));
@@ -196,7 +204,10 @@ describe("workflowEntry", () => {
     expect(getConflict.mock.invocationCallOrder[0]).toBeLessThan(
       vi.mocked(dispatchTurnStep).mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
     );
-    expect(terminateChildSessionsStep).toHaveBeenCalledWith({ sessionState });
+    expect(terminateChildSessionsStep).toHaveBeenCalledWith({
+      serializedContext: expect.any(Object),
+      sessionState,
+    });
   });
 
   it("exits a conflicting initial continuation before dispatching the first turn", async () => {
@@ -334,7 +345,10 @@ describe("workflowEntry", () => {
       token: sessionCommandHookToken("wrun_test_123"),
     });
     expect(timeoutControl.dispose).toHaveBeenCalledOnce();
-    expect(terminateChildSessionsStep).toHaveBeenCalledWith({ sessionState });
+    expect(terminateChildSessionsStep).toHaveBeenCalledWith({
+      serializedContext: expect.any(Object),
+      sessionState,
+    });
     expect(emitTerminalSessionFailureStep).not.toHaveBeenCalled();
     expect(emitTerminalSessionCompletionStep).toHaveBeenCalledWith({
       parentWritable: expect.any(WritableStream),
@@ -531,7 +545,10 @@ describe("workflowEntry", () => {
         error: expect.objectContaining({ message: "persistent recoverable failure" }),
       }),
     );
-    expect(terminateChildSessionsStep).toHaveBeenCalledWith({ sessionState });
+    expect(terminateChildSessionsStep).toHaveBeenCalledWith({
+      serializedContext: expect.any(Object),
+      sessionState,
+    });
     expect(notifyDelegatedParentStep).not.toHaveBeenCalled();
     expect(notifyTurnCallerStep).toHaveBeenCalledOnce();
     expect(notifyTurnCallerStep).toHaveBeenCalledWith({
@@ -1083,6 +1100,7 @@ describe("workflowEntry", () => {
     vi.mocked(routeDeliverToChildren).mockResolvedValueOnce({
       kind: "continue",
       remainder: undefined,
+      serializedContext: {},
       sessionState,
     });
     installHookMocks({
@@ -1119,6 +1137,7 @@ describe("workflowEntry", () => {
     vi.mocked(routeDeliverToChildren).mockResolvedValueOnce({
       kind: "continue",
       remainder: undefined,
+      serializedContext: {},
       sessionState: retiredState,
     });
     installHookMocks({

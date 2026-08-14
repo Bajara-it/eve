@@ -10,6 +10,8 @@ import { preserveSerializedSessionDynamicModelSelection } from "#context/seriali
 import { cancelDescendantTurnsStep } from "#execution/cancel-descendant-turns-step.js";
 import { sendTurnControlStep, type TurnInboxPayload } from "#execution/turn-control-protocol.js";
 import { dispatchRuntimeActionsStep } from "#execution/dispatch-runtime-actions-step.js";
+import { acknowledgeDelegatedTasksStep } from "#execution/tasks/parent/delegate.js";
+import { dispatchTaskStep } from "#execution/tasks/parent/dispatch-task-step.js";
 import { dispatchWorkflowRuntimeActionsStep } from "#execution/dispatch-workflow-runtime-actions-step.js";
 import {
   migrateTurnWorkflowInput,
@@ -162,13 +164,20 @@ async function runTurnOwnedWorkflow(input: TurnWorkflowInput): Promise<void> {
 
       // A pending runtime-action batch (model-driven `park` or dynamic-workflow
       // interrupt) is resolved in-line so the turn stays alive across the wait;
-      // the two arms differ only in their dispatch path.
+      // the arms differ only in their dispatch path: the workflow adapter for
+      // interrupt-sourced batches, and the task-mode sibling when the agent
+      // runs `experimental.tasks`.
       if (pendingActionKeys !== undefined) {
         await cursor.adopt(result);
-        const dispatch =
-          result.action === "dispatch-workflow-runtime-actions"
-            ? dispatchWorkflowRuntimeActionsStep
-            : dispatchRuntimeActionsStep;
+        const hasPendingTasks = result.action === "park" && result.tasksEnabled;
+        let dispatch;
+        if (result.action === "dispatch-workflow-runtime-actions") {
+          dispatch = dispatchWorkflowRuntimeActionsStep;
+        } else if (hasPendingTasks) {
+          dispatch = dispatchTaskStep;
+        } else {
+          dispatch = dispatchRuntimeActionsStep;
+        }
         const dispatchResult = await dispatch({
           callbackBaseUrl: resolveWorkflowCallbackBaseUrl(getWorkflowMetadata().url),
           parentContinuationToken: inbox.token,
@@ -178,6 +187,7 @@ async function runTurnOwnedWorkflow(input: TurnWorkflowInput): Promise<void> {
         });
         const initialAcceptedAtMs = dispatchResult.results.length === 0 ? undefined : Date.now();
         await cursor.adopt(dispatchResult);
+        await acknowledgeDelegatedTasksStep({ tasks: dispatchResult.pendingTasks });
 
         const results = await waitForRuntimeActionResults({
           bufferedDeliveries,
@@ -272,6 +282,11 @@ async function waitForTurnSleep(
 // These sentinels stay outside `RuntimeActionResult`. That union is the
 // schema-validated wire type projected into harness resume calls; these are
 // turn-workflow control outcomes that never leave the workflow.
+interface AcceptedRuntimeActionBatch {
+  readonly acceptedAtMsByCallId: Readonly<Record<string, number>>;
+  readonly results: readonly RuntimeActionResult[];
+}
+
 async function waitForRuntimeActionResults(input: {
   readonly bufferedDeliveries: DeliverHookPayload[];
   readonly cancellation: TurnCancellationControl | undefined;
@@ -394,9 +409,13 @@ async function waitForRuntimeActionResults(input: {
       const routed = await routeDeliverToChildren({
         delivery: value.delivery,
         parentWritable: input.cursor.parentWritable,
+        serializedContext: input.cursor.serializedContext,
         sessionState: input.cursor.sessionState,
       });
-      await input.cursor.adopt(routed);
+      await input.cursor.adopt({
+        serializedContext: routed.serializedContext ?? input.cursor.serializedContext,
+        sessionState: routed.sessionState ?? input.cursor.sessionState,
+      });
       if (routed.kind === "cancel-turn") {
         return routed.kind;
       }
@@ -405,11 +424,6 @@ async function waitForRuntimeActionResults(input: {
       }
     }
   }
-}
-
-interface AcceptedRuntimeActionBatch {
-  readonly acceptedAtMsByCallId: Readonly<Record<string, number>>;
-  readonly results: readonly RuntimeActionResult[];
 }
 
 async function runLegacyTurnWorkflow(input: TurnWorkflowInput): Promise<void> {

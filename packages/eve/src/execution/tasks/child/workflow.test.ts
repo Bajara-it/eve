@@ -1,15 +1,16 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createHook, type Hook } from "#compiled/@workflow/core/index.js";
 
+import type { SubagentAuthorizationEventHookPayload } from "#channel/types.js";
 import { claimHookOwnership, disposeHook } from "#execution/hook-ownership.js";
 import {
-  appendTaskSnapshotStep,
+  appendTaskViewStep,
   deliverTaskInputResponsesStep,
   wakeTaskAuthorizationParentStep,
   wakeTaskInputRequestParentStep,
   wakeTaskParentStep,
-} from "#execution/tasks/run-task.js";
-import { taskRunWorkflow } from "#execution/tasks/run-task-workflow.js";
+} from "#execution/tasks/child/steps.js";
+import { taskRunWorkflow } from "#execution/tasks/child/workflow.js";
 import type {
   TaskCommandHookPayload,
   TaskInboundAnswerInput,
@@ -21,14 +22,14 @@ vi.mock("#compiled/@workflow/core/index.js", () => ({
   createHook: vi.fn(),
 }));
 
-vi.mock("../hook-ownership.js", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../hook-ownership.js")>()),
+vi.mock("#execution/hook-ownership.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("#execution/hook-ownership.js")>()),
   claimHookOwnership: vi.fn(),
   disposeHook: vi.fn(),
 }));
 
-vi.mock("./run-task.js", () => ({
-  appendTaskSnapshotStep: vi.fn(),
+vi.mock("#execution/tasks/child/steps.js", () => ({
+  appendTaskViewStep: vi.fn(),
   deliverTaskInputResponsesStep: vi.fn(),
   wakeTaskAuthorizationParentStep: vi.fn(),
   wakeTaskInputRequestParentStep: vi.fn(),
@@ -52,7 +53,9 @@ function createWorkingView(): TaskView {
   };
 }
 
-function mockCommandHook(payloads: readonly TaskRunInboundPayload[]): void {
+function mockCommandHook(
+  payloads: readonly (TaskRunInboundPayload | SubagentAuthorizationEventHookPayload)[],
+): void {
   const queue = [...payloads];
   const hook = {
     [Symbol.asyncIterator]: () => ({
@@ -62,17 +65,18 @@ function mockCommandHook(payloads: readonly TaskRunInboundPayload[]): void {
           : { done: true as const, value: undefined },
     }),
     token: "task-token",
-  } as Hook<TaskRunInboundPayload>;
+  } as Hook<TaskRunInboundPayload | SubagentAuthorizationEventHookPayload>;
   vi.mocked(createHook).mockReturnValue(hook);
 }
 
 function appendedStatuses(): readonly string[] {
-  return vi.mocked(appendTaskSnapshotStep).mock.calls.map(([input]) => input.view.status);
+  return vi.mocked(appendTaskViewStep).mock.calls.map(([input]) => input.view.status);
 }
 
 describe("taskRunWorkflow", () => {
-  it("publishes the initial snapshot, applies commands, and stops at terminal", async () => {
+  it("publishes the initial view, applies commands, and stops at terminal", async () => {
     mockCommandHook([
+      { command: { kind: "ready" }, kind: "task-command" },
       {
         command: {
           inputRequests: [{ question: "which?", requestId: "req-1" }],
@@ -87,23 +91,29 @@ describe("taskRunWorkflow", () => {
     ]);
 
     await taskRunWorkflow({
-      continuationToken: "task-token",
+      taskInboxToken: "task-token",
       initialView: createWorkingView(),
       parentContinuationToken: "parent-session-token",
     });
 
-    expect(appendedStatuses()).toEqual(["working", "input_required", "working", "completed"]);
+    expect(appendedStatuses()).toEqual([
+      "working",
+      "working",
+      "input_required",
+      "working",
+      "completed",
+    ]);
     expect(disposeHook).toHaveBeenCalledTimes(1);
   });
 
-  it("skips snapshots for rejected and noop commands", async () => {
+  it("skips views for rejected and noop commands", async () => {
     mockCommandHook([
       { command: { kind: "answered", requestIds: ["req-1"] }, kind: "task-command" }, // noop on working
       { command: { kind: "cancel" }, kind: "task-command" },
     ]);
 
     await taskRunWorkflow({
-      continuationToken: "task-token",
+      taskInboxToken: "task-token",
       initialView: createWorkingView(),
       parentContinuationToken: "parent-session-token",
     });
@@ -118,12 +128,12 @@ describe("taskRunWorkflow", () => {
     );
 
     await taskRunWorkflow({
-      continuationToken: "task-token",
+      taskInboxToken: "task-token",
       initialView: createWorkingView(),
       parentContinuationToken: "parent-session-token",
     });
 
-    expect(appendTaskSnapshotStep).not.toHaveBeenCalled();
+    expect(appendTaskViewStep).not.toHaveBeenCalled();
     expect(disposeHook).not.toHaveBeenCalled();
   });
 
@@ -133,7 +143,7 @@ describe("taskRunWorkflow", () => {
     ]);
 
     await taskRunWorkflow({
-      continuationToken: "task-token",
+      taskInboxToken: "task-token",
       initialView: createWorkingView(),
       parentContinuationToken: "parent-session-token",
     });
@@ -145,6 +155,7 @@ describe("taskRunWorkflow", () => {
   it("translates a settled child turn from the wire and wakes the parent once ready", async () => {
     const ZERO = { cacheReadTokens: 0, cacheWriteTokens: 0, inputTokens: 0, outputTokens: 0 };
     mockCommandHook([
+      { command: { kind: "ready" }, kind: "task-command" },
       {
         kind: "runtime-action-result",
         results: [
@@ -161,7 +172,7 @@ describe("taskRunWorkflow", () => {
     ]);
 
     await taskRunWorkflow({
-      continuationToken: "task-token",
+      taskInboxToken: "task-token",
       initialView: {
         ...createWorkingView(),
         metadata: {
@@ -174,7 +185,7 @@ describe("taskRunWorkflow", () => {
       parentContinuationToken: "parent-session-token",
     });
 
-    expect(appendedStatuses()).toEqual(["working", "completed"]);
+    expect(appendedStatuses()).toEqual(["working", "working", "completed"]);
     expect(wakeTaskParentStep).toHaveBeenCalledTimes(1);
     expect(vi.mocked(wakeTaskParentStep).mock.calls[0]?.[0]).toMatchObject({
       token: "parent-session-token",
@@ -200,12 +211,32 @@ describe("taskRunWorkflow", () => {
     ]);
 
     await taskRunWorkflow({
-      continuationToken: "task-token",
+      taskInboxToken: "task-token",
       initialView: createWorkingView(),
       parentContinuationToken: "parent-session-token",
     });
 
     expect(appendedStatuses()).toEqual(["working", "completed"]);
+    expect(wakeTaskParentStep).toHaveBeenCalledTimes(1);
+    expect(disposeHook).toHaveBeenCalledTimes(1);
+  });
+
+  it("silently terminates a dispatch rejected before parent indexing", async () => {
+    mockCommandHook([
+      {
+        command: { data: { code: "START_FAILED" }, kind: "reject-dispatch" },
+        kind: "task-command",
+      },
+    ]);
+
+    await taskRunWorkflow({
+      taskInboxToken: "task-token",
+      initialView: createWorkingView(),
+      parentContinuationToken: "parent-session-token",
+    });
+
+    expect(appendedStatuses()).toEqual(["working", "failed"]);
+    expect(wakeTaskParentStep).not.toHaveBeenCalled();
     expect(disposeHook).toHaveBeenCalledTimes(1);
   });
 
@@ -235,7 +266,7 @@ describe("taskRunWorkflow", () => {
     ]);
 
     await taskRunWorkflow({
-      continuationToken: "task-token",
+      taskInboxToken: "task-token",
       initialView: createWorkingView(),
       parentContinuationToken: "parent-session-token",
     });
@@ -244,13 +275,14 @@ describe("taskRunWorkflow", () => {
     expect(wakeTaskParentStep).not.toHaveBeenCalled();
   });
 
-  it("holds a fast authorization event until the readiness barrier", async () => {
+  it("normalizes and holds a local authorization event until the readiness barrier", async () => {
     mockCommandHook([
       {
         callId: "call-task",
         childSessionId: "child-session",
         event: {
           data: {
+            attemptId: "github-1",
             description: "Authorize GitHub",
             name: "github",
             sequence: 1,
@@ -259,27 +291,105 @@ describe("taskRunWorkflow", () => {
           },
           type: "authorization.required",
         },
-        kind: "authorization-event",
+        kind: "subagent-authorization-event",
+        subagentName: "research",
+      },
+      {
+        callId: "call-task",
+        childSessionId: "child-session",
+        event: {
+          data: {
+            attemptId: "linear-1",
+            description: "Authorize Linear",
+            name: "linear",
+            sequence: 1,
+            stepIndex: 2,
+            turnId: "turn-child",
+          },
+          type: "authorization.required",
+        },
+        kind: "subagent-authorization-event",
         subagentName: "research",
       },
       { command: { kind: "ready" }, kind: "task-command" },
     ]);
 
     await taskRunWorkflow({
-      continuationToken: "task-token",
+      taskInboxToken: "task-token",
       initialView: createWorkingView(),
       parentContinuationToken: "parent-session-token",
     });
 
-    expect(appendedStatuses()).toEqual(["working", "input_required", "input_required"]);
-    expect(wakeTaskAuthorizationParentStep).toHaveBeenCalledTimes(1);
+    expect(appendedStatuses()).toEqual([
+      "working",
+      "input_required",
+      "input_required",
+      "input_required",
+    ]);
+    expect(wakeTaskAuthorizationParentStep).toHaveBeenCalledTimes(2);
+    expect(wakeTaskAuthorizationParentStep).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        request: expect.objectContaining({
+          event: expect.objectContaining({
+            data: expect.objectContaining({ name: "github" }),
+          }),
+        }),
+      }),
+    );
+    expect(wakeTaskAuthorizationParentStep).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        request: expect.objectContaining({
+          event: expect.objectContaining({
+            data: expect.objectContaining({ name: "linear" }),
+          }),
+        }),
+      }),
+    );
     expect(vi.mocked(wakeTaskAuthorizationParentStep).mock.invocationCallOrder[0]).toBeGreaterThan(
-      vi.mocked(appendTaskSnapshotStep).mock.invocationCallOrder[2] ?? 0,
+      vi.mocked(appendTaskViewStep).mock.invocationCallOrder[2] ?? 0,
+    );
+  });
+
+  it("ignores approval lifecycle events and still wakes on terminal settlement", async () => {
+    mockCommandHook([
+      { command: { kind: "ready" }, kind: "task-command" },
+      {
+        callId: "call-task",
+        childSessionId: "child-session-1",
+        event: {
+          data: {
+            outcome: "approved",
+            requestId: "stale-1",
+            responderPrincipalId: "user-1",
+            sequence: 1,
+            stepIndex: 2,
+            turnId: "turn-child",
+          },
+          type: "approval.settled",
+        },
+        kind: "subagent-authorization-event",
+        subagentName: "research",
+      },
+      { command: { data: "done", kind: "complete" }, kind: "task-command" },
+    ]);
+
+    await taskRunWorkflow({
+      taskInboxToken: "task-token",
+      initialView: createWorkingView(),
+      parentContinuationToken: "parent-session-token",
+    });
+
+    expect(wakeTaskAuthorizationParentStep).not.toHaveBeenCalled();
+    expect(wakeTaskParentStep).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ view: expect.objectContaining({ status: "completed" }) }),
     );
   });
 
   it("never wakes twice for one blocked child", async () => {
     mockCommandHook([
+      { command: { kind: "ready" }, kind: "task-command" },
       {
         command: { inputRequests: [{ q: 1, requestId: "q1" }], kind: "require-input" },
         kind: "task-command",
@@ -292,7 +402,7 @@ describe("taskRunWorkflow", () => {
     ]);
 
     await taskRunWorkflow({
-      continuationToken: "task-token",
+      taskInboxToken: "task-token",
       initialView: createWorkingView(),
       parentContinuationToken: "parent-session-token",
     });
@@ -331,7 +441,7 @@ describe("taskRunWorkflow", () => {
     ]);
 
     await taskRunWorkflow({
-      continuationToken: "task-token",
+      taskInboxToken: "task-token",
       initialView: createWorkingView(),
       parentContinuationToken: "parent-session-token",
     });
@@ -350,8 +460,7 @@ describe("taskRunWorkflow", () => {
     );
     const firstInputWakeOrder =
       vi.mocked(wakeTaskInputRequestParentStep).mock.invocationCallOrder[0] ?? 0;
-    const firstInputAppendOrder =
-      vi.mocked(appendTaskSnapshotStep).mock.invocationCallOrder[2] ?? 0;
+    const firstInputAppendOrder = vi.mocked(appendTaskViewStep).mock.invocationCallOrder[2] ?? 0;
     expect(firstInputAppendOrder).toBeLessThan(firstInputWakeOrder);
   });
 });
@@ -385,7 +494,7 @@ describe("taskRunWorkflow answered input", () => {
     ]);
 
     await taskRunWorkflow({
-      continuationToken: "task-token",
+      taskInboxToken: "task-token",
       initialView: createWorkingView(),
       parentContinuationToken: "parent-session-token",
     });
@@ -396,7 +505,7 @@ describe("taskRunWorkflow answered input", () => {
     });
     expect(appendedStatuses()).toEqual(["working", "input_required", "working", "completed"]);
     const deliveryOrder = vi.mocked(deliverTaskInputResponsesStep).mock.invocationCallOrder[0] ?? 0;
-    const unblockOrder = vi.mocked(appendTaskSnapshotStep).mock.invocationCallOrder[2] ?? 0;
+    const unblockOrder = vi.mocked(appendTaskViewStep).mock.invocationCallOrder[2] ?? 0;
     expect(deliveryOrder).toBeLessThan(unblockOrder);
   });
 
@@ -410,7 +519,7 @@ describe("taskRunWorkflow answered input", () => {
     ]);
 
     await taskRunWorkflow({
-      continuationToken: "task-token",
+      taskInboxToken: "task-token",
       initialView: createWorkingView(),
       parentContinuationToken: "parent-session-token",
     });
@@ -433,7 +542,7 @@ describe("taskRunWorkflow answered input", () => {
     ]);
 
     await taskRunWorkflow({
-      continuationToken: "task-token",
+      taskInboxToken: "task-token",
       initialView: createWorkingView(),
       parentContinuationToken: "parent-session-token",
     });
@@ -442,7 +551,7 @@ describe("taskRunWorkflow answered input", () => {
       answer: answer("q1", "unknown"),
       requestIds: ["q1"],
     });
-    const blockedAgain = vi.mocked(appendTaskSnapshotStep).mock.calls[2]?.[0].view;
+    const blockedAgain = vi.mocked(appendTaskViewStep).mock.calls[2]?.[0].view;
     expect(blockedAgain?.status).toBe("input_required");
     expect(blockedAgain?.inputRequests).toEqual([{ prompt: "q2", requestId: "q2" }]);
   });
@@ -456,7 +565,7 @@ describe("taskRunWorkflow answered input", () => {
     ]);
 
     await taskRunWorkflow({
-      continuationToken: "task-token",
+      taskInboxToken: "task-token",
       initialView: createWorkingView(),
       parentContinuationToken: "parent-session-token",
     });
@@ -473,7 +582,7 @@ describe("taskRunWorkflow answered input", () => {
     ]);
 
     await taskRunWorkflow({
-      continuationToken: "task-token",
+      taskInboxToken: "task-token",
       initialView: createWorkingView(),
       parentContinuationToken: "parent-session-token",
     });

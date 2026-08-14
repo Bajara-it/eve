@@ -8,7 +8,7 @@ import type {
 import { isTerminalTaskStatus, readTaskInputRequestId } from "#tasks/types.js";
 
 /**
- * Outcome of applying one command to a task snapshot.
+ * Outcome of applying one command to a task view.
  *
  * - `accepted`: the state changed; the new view must be appended.
  * - `noop`: the command is recognized and benign (idempotent cancel,
@@ -16,7 +16,7 @@ import { isTerminalTaskStatus, readTaskInputRequestId } from "#tasks/types.js";
  * - `rejected`: the command is invalid for the current status; the
  *   reason is diagnostic only.
  */
-export type TaskTransitionResult =
+type TaskTransitionResult =
   | { readonly outcome: "accepted"; readonly view: TaskView }
   | { readonly outcome: "noop"; readonly view: TaskView }
   | { readonly outcome: "rejected"; readonly view: TaskView; readonly reason: string };
@@ -39,13 +39,13 @@ export type TaskTransitionResult =
  * transitions.
  */
 /**
- * Builds the settled snapshot for one terminal command, carrying the
+ * Builds the settled view for one terminal command, carrying the
  * child's lifecycle verdict and reported usage when present. Usage is
  * retention-only: nothing folds it into parent budgets yet.
  */
 function terminalView(
   view: TaskView,
-  command: Extract<TaskCommand, { kind: "complete" | "fail" | "cancel" }>,
+  command: Extract<TaskCommand, { kind: "complete" | "fail" | "reject-dispatch" | "cancel" }>,
   settled:
     | {
         readonly lastOutput: Extract<TaskOutput, { type: "result" }>;
@@ -107,6 +107,7 @@ export function applyTaskTransition(view: TaskView, command: TaskCommand): TaskT
         }),
       };
     case "fail":
+    case "reject-dispatch":
       return {
         outcome: "accepted",
         view: terminalView(view, command, {
@@ -125,6 +126,32 @@ export function applyTaskTransition(view: TaskView, command: TaskCommand): TaskT
         reason: `Task "${view.taskId}" is not terminal; usage settles with its terminal command.`,
         view,
       };
+    case "require-authorization": {
+      const blocker = { blockedOn: "authorization", requestId: command.requestId };
+      if (view.status === "input_required") {
+        if (
+          view.inputRequests.some(
+            (request) => readTaskInputRequestId(request) === command.requestId,
+          )
+        ) {
+          return { outcome: "noop", view };
+        }
+        return {
+          outcome: "accepted",
+          view: { ...view, inputRequests: [...view.inputRequests, blocker] },
+        };
+      }
+      return {
+        outcome: "accepted",
+        view: {
+          inputRequests: [blocker],
+          executor: view.executor,
+          metadata: view.metadata,
+          status: "input_required",
+          taskId: view.taskId,
+        },
+      };
+    }
     case "require-input":
       if (!isValidInputRequestBatch(command.inputRequests)) {
         return {
@@ -153,7 +180,7 @@ export function applyTaskTransition(view: TaskView, command: TaskCommand): TaskT
       }
 
       const answered = new Set(command.requestIds);
-      const outstanding = view.inputRequests ?? [];
+      const outstanding = view.inputRequests;
       const remaining = outstanding.filter((request) => {
         const requestId = readTaskInputRequestId(request);
         return requestId === undefined || !answered.has(requestId);

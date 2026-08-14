@@ -1,23 +1,17 @@
 import { getWritable } from "#compiled/@workflow/core/index.js";
-import {
-  EntityConflictError,
-  HookNotFoundError,
-  RunExpiredError,
-  WorkflowRunNotFoundError,
-} from "#compiled/@workflow/errors/index.js";
-
 import type {
   SessionAuthContext,
   SessionCommand,
   SubagentAuthorizationEventHookPayload,
   SubagentInputRequestHookPayload,
 } from "#channel/types.js";
+import { isTaskWorkflowTargetGone } from "#execution/tasks/workflow-target.js";
 import { resumeHook } from "#internal/workflow/runtime.js";
 import { createLogger } from "#internal/logging.js";
-import { walkCauseChain } from "#shared/errors.js";
 import {
   isTerminalTaskStatus,
-  TASK_SNAPSHOT_STREAM_NAMESPACE,
+  taskAuthorizationRequestId,
+  TASK_VIEW_STREAM_NAMESPACE,
   type TaskInboundAnswerInput,
   type TaskInboundAuthorizationEvent,
   type TaskInboundInputRequest,
@@ -27,14 +21,14 @@ import {
 const log = createLogger("execution.tasks.run");
 
 /**
- * Appends one full task snapshot to the owning task run's `eve.task`
+ * Appends one full task view to the owning task run's `eve.task`
  * stream. Only the task run workflow calls this, which is what makes
  * the run the single writer readers can trust without re-validating.
  */
-export async function appendTaskSnapshotStep(input: { readonly view: TaskView }): Promise<void> {
+export async function appendTaskViewStep(input: { readonly view: TaskView }): Promise<void> {
   "use step";
 
-  const writable = getWritable<TaskView>({ namespace: TASK_SNAPSHOT_STREAM_NAMESPACE });
+  const writable = getWritable<TaskView>({ namespace: TASK_VIEW_STREAM_NAMESPACE });
   const writer = writable.getWriter();
   try {
     await writer.write(input.view);
@@ -58,11 +52,6 @@ export async function wakeTaskAuthorizationParentStep(input: {
     kind: "subagent-authorization-event",
     subagentName: input.request.subagentName,
   };
-  const eventId =
-    input.request.event.type === "approval.candidate" ||
-    input.request.event.type === "approval.settled"
-      ? input.request.event.data.requestId
-      : input.request.event.data.name;
   const data = input.request.event.data;
   const payload: {
     message?: string;
@@ -79,12 +68,12 @@ export async function wakeTaskAuthorizationParentStep(input: {
   const command: SessionCommand = {
     kind: "send",
     payload,
-    taskDeliveryId: `${input.taskId}:authorization:${input.request.event.type}:${data.turnId}:${data.stepIndex}:${data.sequence}:${eventId}`,
+    taskDeliveryId: `${input.taskId}:authorization:${input.request.event.type}:${data.turnId}:${data.stepIndex}:${data.sequence}:${taskAuthorizationRequestId(input.request.event)}`,
   };
   try {
     await resumeHook(input.token, command);
   } catch (error) {
-    if (isGoneParentTarget(error)) return;
+    if (isTaskWorkflowTargetGone(error)) return;
     throw error;
   }
 }
@@ -103,10 +92,10 @@ export async function wakeTaskParentStep(input: {
 }): Promise<void> {
   "use step";
 
-  const payload: { message: string; task?: { snapshots: readonly TaskView[] } } = {
+  const payload: { message: string; task?: { views: readonly TaskView[] } } = {
     message: formatTaskNotification(input.view),
   };
-  if (isTerminalTaskStatus(input.view.status)) payload.task = { snapshots: [input.view] };
+  if (isTerminalTaskStatus(input.view.status)) payload.task = { views: [input.view] };
   const command: SessionCommand = {
     kind: "send",
     payload,
@@ -115,7 +104,7 @@ export async function wakeTaskParentStep(input: {
   try {
     await resumeHook(input.token, command);
   } catch (error) {
-    if (isGoneParentTarget(error)) {
+    if (isTaskWorkflowTargetGone(error)) {
       log.warn("task wake target is gone; the parent session already ended", {
         status: input.view.status,
         taskId: input.view.taskId,
@@ -151,7 +140,7 @@ export async function wakeTaskInputRequestParentStep(input: {
   try {
     await resumeHook(input.token, command);
   } catch (error) {
-    if (isGoneParentTarget(error)) return;
+    if (isTaskWorkflowTargetGone(error)) return;
     throw error;
   }
 }
@@ -160,7 +149,7 @@ export async function wakeTaskInputRequestParentStep(input: {
  * Forwards answered input to the blocked child.
  *
  * The task run performs this itself so the child unblocks and the
- * snapshot leaves `input_required` under one durable decision. Returns
+ * view leaves `input_required` under one durable decision. Returns
  * `unreachable` when the child hook is already gone, which leaves the
  * outstanding batch untouched rather than reporting a task as working
  * when nothing received the answer.
@@ -198,7 +187,7 @@ export async function deliverTaskInputResponsesStep(input: {
     }
     return "delivered";
   } catch (error) {
-    if (isGoneParentTarget(error)) {
+    if (isTaskWorkflowTargetGone(error)) {
       log.warn("task input answer target is gone; the child turn already ended", {
         taskId: input.answer.taskId,
       });
@@ -214,18 +203,4 @@ function formatTaskNotification(view: TaskView): string {
     return `${subject} needs input. Use task_peek to inspect the outstanding requests.`;
   }
   return `${subject} is ${view.status}. Use task_peek to read its output.`;
-}
-
-function isGoneParentTarget(error: unknown): boolean {
-  for (const candidate of walkCauseChain(error)) {
-    if (
-      HookNotFoundError.is(candidate) ||
-      WorkflowRunNotFoundError.is(candidate) ||
-      RunExpiredError.is(candidate) ||
-      EntityConflictError.is(candidate)
-    ) {
-      return true;
-    }
-  }
-  return false;
 }

@@ -37,7 +37,7 @@ describe("session task index", () => {
 
   it("records a task and finds it by id", () => {
     const session = recordSessionTask(createSession(), {
-      continuationToken: "task:token-1",
+      taskInboxToken: "task:token-1",
       createdByTurnId: "turn-1",
       metadata,
       operationId: "operation-1",
@@ -46,7 +46,7 @@ describe("session task index", () => {
     });
 
     expect(findSessionTaskEntry(session.state, "task_a")).toEqual({
-      continuationToken: "task:token-1",
+      taskInboxToken: "task:token-1",
       createdByTurnId: "turn-1",
       metadata,
       operationId: "operation-1",
@@ -58,7 +58,7 @@ describe("session task index", () => {
 
   it("replaces the entry on replayed creation instead of duplicating it", () => {
     let session = recordSessionTask(createSession(), {
-      continuationToken: "task:token-1",
+      taskInboxToken: "task:token-1",
       createdByTurnId: "turn-1",
       metadata,
       operationId: "operation-1",
@@ -66,7 +66,7 @@ describe("session task index", () => {
       taskRunId: "run-1",
     });
     session = recordSessionTask(session, {
-      continuationToken: "task:token-2",
+      taskInboxToken: "task:token-2",
       createdByTurnId: "turn-1",
       metadata,
       operationId: "operation-1",
@@ -79,27 +79,25 @@ describe("session task index", () => {
     expect(entries[0]?.taskRunId).toBe("run-2");
   });
 
-  it("retains only terminal snapshots as expired-run fallbacks", () => {
+  it("retains only terminal views as expired-run fallbacks", () => {
     const base = {
-      continuationToken: "task:token-1",
+      taskInboxToken: "task:token-1",
       createdByTurnId: "turn-1",
       metadata,
       operationId: "operation-1",
       taskId: "task_a",
       taskRunId: "run-1",
     };
-    const terminalSnapshot = {
+    const terminalView = {
       lastOutput: { data: "done", type: "result" as const },
       metadata,
       status: "completed" as const,
       taskId: "task_a",
     };
 
-    const session = recordSessionTask(createSession(), { ...base, terminalSnapshot });
-    expect(findSessionTaskEntry(session.state, "task_a")?.terminalSnapshot).toEqual(
-      terminalSnapshot,
-    );
-    for (const invalidSnapshot of [
+    const session = recordSessionTask(createSession(), { ...base, terminalView });
+    expect(findSessionTaskEntry(session.state, "task_a")?.terminalView).toEqual(terminalView);
+    for (const invalidView of [
       { metadata, status: "working", taskId: "task_a" },
       { metadata, status: "completed", taskId: "task_a" },
       {
@@ -121,12 +119,12 @@ describe("session task index", () => {
         status: "completed",
         taskId: "task_a",
       },
-      { ...terminalSnapshot, taskId: "task_other" },
+      { ...terminalView, taskId: "task_other" },
     ]) {
       expect(() =>
         getSessionTaskIndex({
           [SESSION_TASKS_STATE_KEY]: {
-            tasks: [{ ...base, terminalSnapshot: invalidSnapshot }],
+            tasks: [{ ...base, terminalView: invalidView }],
           },
         }),
       ).toThrow(`Corrupt task index under session state key "${SESSION_TASKS_STATE_KEY}"`);

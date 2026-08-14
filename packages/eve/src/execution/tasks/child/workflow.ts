@@ -1,13 +1,14 @@
 import { createHook } from "#compiled/@workflow/core/index.js";
 
+import type { SubagentAuthorizationEventHookPayload } from "#channel/types.js";
 import { claimHookOwnership, disposeHook, isHookConflictError } from "#execution/hook-ownership.js";
 import {
-  appendTaskSnapshotStep,
+  appendTaskViewStep,
   deliverTaskInputResponsesStep,
   wakeTaskAuthorizationParentStep,
   wakeTaskInputRequestParentStep,
   wakeTaskParentStep,
-} from "#execution/tasks/run-task.js";
+} from "#execution/tasks/child/steps.js";
 import { applyTaskTransition } from "#tasks/transitions.js";
 import { translateTaskInboundPayload } from "#tasks/wire.js";
 import {
@@ -25,13 +26,15 @@ import {
 
 /** Input for one durable task run. */
 export interface TaskRunWorkflowInput {
-  /** Private continuation token; a routing credential, never model-visible. */
-  readonly continuationToken: string;
-  /** The creation snapshot, normally `working`. */
+  /** Private task inbox token; a routing credential, never model-visible. */
+  readonly taskInboxToken: string;
+  /** The creation view, normally `working`. */
   readonly initialView: TaskView;
   /** Parent session delivery token used to wake the task's owning parent. */
   readonly parentContinuationToken: string;
 }
+
+type TaskRunHookPayload = TaskRunInboundPayload | SubagentAuthorizationEventHookPayload;
 
 function isTaskRunFinished(view: TaskView, dispatchAcknowledged: boolean): boolean {
   if (!isTerminalTaskStatus(view.status) || !dispatchAcknowledged) return false;
@@ -46,7 +49,7 @@ function isTaskRunFinished(view: TaskView, dispatchAcknowledged: boolean): boole
  *
  * Consumes commands and child wire payloads over its private hook,
  * applies the pure transition function, and appends a full `TaskView`
- * snapshot per accepted command to its `eve.task` run stream. Competing
+ * per accepted command to its `eve.task` run stream. Competing
  * completion, cancellation, and input transitions serialize here;
  * rejected commands (for example a late child result after `cancelled`)
  * change nothing.
@@ -56,7 +59,7 @@ function isTaskRunFinished(view: TaskView, dispatchAcknowledged: boolean): boole
  * session. A parked parent starts a turn; an active turn observes the
  * delivery at its next safe boundary. Nothing else wakes the parent.
  *
- * The run ends when the task reaches a terminal status. Its snapshot
+ * The run ends when the task reaches a terminal status. Its view
  * stream stays readable, so terminal tasks remain peekable; the
  * disposed hook makes any later command fail loudly instead of queueing
  * against a finished task.
@@ -64,7 +67,7 @@ function isTaskRunFinished(view: TaskView, dispatchAcknowledged: boolean): boole
 export async function taskRunWorkflow(input: TaskRunWorkflowInput): Promise<void> {
   "use workflow";
 
-  const commands = createHook<TaskRunInboundPayload>({ token: input.continuationToken });
+  const commands = createHook<TaskRunHookPayload>({ token: input.taskInboxToken });
   // The iterator shares the hook's durable cursor; create it before
   // claiming so conflict replay is consumed by getConflict(), not a
   // later iterator read.
@@ -85,21 +88,39 @@ export async function taskRunWorkflow(input: TaskRunWorkflowInput): Promise<void
 
     let view = input.initialView;
     let pendingInputRequest: TaskInboundInputRequest | undefined;
-    let pendingAuthorizationEvent: TaskInboundAuthorizationEvent | undefined;
+    let pendingAuthorizationEvents: TaskInboundAuthorizationEvent[] = [];
     let dispatchAcknowledged = false;
-    await appendTaskSnapshotStep({ view });
+    await appendTaskViewStep({ view });
 
     while (!isTaskRunFinished(view, dispatchAcknowledged)) {
       const next = await iterator.next();
       if (next.done === true) return;
-      if (next.value.kind === "task-command") dispatchAcknowledged = true;
-      if (next.value.kind === "subagent-input-request") {
-        pendingInputRequest = next.value;
+      const payload: TaskRunInboundPayload =
+        next.value.kind === "subagent-authorization-event"
+          ? { ...next.value, kind: "authorization-event" }
+          : next.value;
+      // Approval lifecycle events (`approval.candidate`/`approval.settled`)
+      // are intra-child responder bookkeeping, not task blockers: only
+      // `authorization.required`/`authorization.completed` may block or
+      // unblock a task. Forwarding them would mint bogus `answered`
+      // commands and race the terminal wake.
+      if (
+        payload.kind === "authorization-event" &&
+        (payload.event.type === "approval.candidate" || payload.event.type === "approval.settled")
+      ) {
+        continue;
       }
-      if (next.value.kind === "authorization-event") {
-        pendingAuthorizationEvent = next.value;
+      const isReadinessCommand =
+        payload.kind === "task-command" && payload.command.kind === "ready";
+      const isRejectedDispatch =
+        payload.kind === "task-command" && payload.command.kind === "reject-dispatch";
+      if (isReadinessCommand || isRejectedDispatch) dispatchAcknowledged = true;
+      if (payload.kind === "subagent-input-request") {
+        pendingInputRequest = payload;
       }
-      const payload = next.value;
+      if (payload.kind === "authorization-event") {
+        pendingAuthorizationEvents.push(payload);
+      }
       const isExecutorResultAfterCancellation =
         view.status === "cancelled" && payload.kind === "runtime-action-result";
       const isTaskInputAnswer = payload.kind === "input-response";
@@ -117,21 +138,27 @@ export async function taskRunWorkflow(input: TaskRunWorkflowInput): Promise<void
         command = translateTaskInboundPayload(payload);
       }
       if (command === undefined) continue;
+      if (isReadinessCommand && isTerminalTaskStatus(view.status)) {
+        await wakeTaskParentStep({ token: input.parentContinuationToken, view });
+        continue;
+      }
       const result = applyTaskTransition(view, command);
       if (result.outcome !== "accepted") continue;
       const becameTerminal =
         !isTerminalTaskStatus(view.status) && isTerminalTaskStatus(result.view.status);
       const becameReady = !isReadyTaskStatus(view.status) && isReadyTaskStatus(result.view.status);
       view = result.view;
-      await appendTaskSnapshotStep({ view });
-      if (pendingAuthorizationEvent !== undefined && dispatchAcknowledged) {
+      await appendTaskViewStep({ view });
+      const routableAuthorizationEvents =
+        dispatchAcknowledged && !becameTerminal ? pendingAuthorizationEvents : [];
+      for (const request of routableAuthorizationEvents) {
         await wakeTaskAuthorizationParentStep({
-          request: pendingAuthorizationEvent,
+          request,
           taskId: view.taskId,
           token: input.parentContinuationToken,
         });
-        pendingAuthorizationEvent = undefined;
       }
+      if (becameTerminal || routableAuthorizationEvents.length > 0) pendingAuthorizationEvents = [];
       const routableInputRequest =
         pendingInputRequest !== undefined &&
         dispatchAcknowledged &&
@@ -143,7 +170,12 @@ export async function taskRunWorkflow(input: TaskRunWorkflowInput): Promise<void
           token: input.parentContinuationToken,
         });
         pendingInputRequest = undefined;
-      } else if (becameTerminal || (becameReady && pendingInputRequest === undefined)) {
+      } else if (
+        !isRejectedDispatch &&
+        routableAuthorizationEvents.length === 0 &&
+        dispatchAcknowledged &&
+        (becameTerminal || (becameReady && pendingInputRequest === undefined))
+      ) {
         await wakeTaskParentStep({ token: input.parentContinuationToken, view });
       }
       // An unrouted request cannot outlive the block it described, or a
