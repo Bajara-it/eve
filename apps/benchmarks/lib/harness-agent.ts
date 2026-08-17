@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { performance } from "node:perf_hooks";
 import { pathToFileURL } from "node:url";
 
 import type { HarnessV1NetworkSandboxSession } from "@ai-sdk/harness";
@@ -36,12 +37,12 @@ export function createAuthoringAgent(subject: {
   readonly dependencyDigest: string;
 }): Agent {
   return {
-    name: subject.name,
+    name: `codex-${subject.name}`,
     displayName: "eve authoring harness",
     getApiKeyEnvVar: () => "AI_GATEWAY_API_KEY",
     getDefaultModel: () => AUTHORING_MODEL,
     definition: {
-      name: subject.name,
+      name: `codex-${subject.name}`,
       displayName: "eve authoring harness",
       defaultModel: AUTHORING_MODEL,
       o11yAgentName: HARNESS_NAME,
@@ -67,13 +68,13 @@ export function createAuthoringAgent(subject: {
         env: {
           EVE_INIT_PACKAGE_SPEC: EVE_PACKAGE_PATH,
           [AUTHORING_EVAL_DIRECTORY_ENV]: AUTHORING_EVAL_DIRECTORY,
-          ...Object.assign({}, ...setups.map((setup) => setup.environment ?? {})),
         },
         log,
       });
       const startedAt = Date.now();
       const commands: string[] = [];
       const transcript: AuthoringTranscriptEntry[] = [];
+      const turnTimings: AuthoringTurnTiming[] = [];
       let session: HarnessAgentSession | undefined;
       let activeSandbox: HarnessV1NetworkSandboxSession | undefined;
       let workspace: string | undefined;
@@ -86,7 +87,7 @@ export function createAuthoringAgent(subject: {
       if (options.model !== undefined) Object.assign(harnessOptions, { model: options.model });
 
       const agent = new HarnessAgent({
-        id: "eve-benchmark",
+        id: "codex-eve-benchmark",
         harness: createCodex(harnessOptions),
         sandbox,
         sandboxConfig: {
@@ -138,14 +139,19 @@ export function createAuthoringAgent(subject: {
           send: async (prompt) => {
             transcript.push({ role: "user", content: prompt });
             if (verbose) console.log(`[user] ${prompt}`);
-            const result = verbose
-              ? await streamTurn(agent, session!, prompt, options.timeout, options.signal)
-              : await agent.generate({
-                  session: session!,
-                  prompt,
-                  timeout: options.timeout,
-                  abortSignal: options.signal,
-                });
+            const result = await streamTurn(
+              agent,
+              session!,
+              prompt,
+              options.timeout,
+              options.signal,
+              verbose,
+            );
+            turnTimings.push({
+              elapsedMs: result.elapsedMs,
+              index: turnTimings.length + 1,
+              steps: result.steps,
+            });
             transcript.push({ role: "assistant", content: result.text });
             commands.push(...shellCommands(result.toolCalls));
             return { text: result.text, toolCalls: result.toolCalls };
@@ -155,7 +161,10 @@ export function createAuthoringAgent(subject: {
         const context = setupContext(activeSandbox, workspace);
         await context.write(
           `${AGENT_EVAL_DIRECTORY}/results.json`,
-          JSON.stringify({ o11y: { shellCommands: commands.map((command) => ({ command })) } }),
+          JSON.stringify({
+            o11y: { shellCommands: commands.map((command) => ({ command })) },
+            timing: { agentTurns: turnTimings, totalAgentElapsedMs: sumTurnTimings(turnTimings) },
+          }),
         );
         await context.write(
           `${AGENT_EVAL_DIRECTORY}/harness-transcript.json`,
@@ -203,6 +212,13 @@ export function createAuthoringAgent(subject: {
           ),
         );
         const scriptsPassed = Object.values(scriptsResults).every((result) => result.success);
+        scriptsResults.timing = {
+          success: true,
+          output: JSON.stringify({
+            agentTurns: turnTimings,
+            totalAgentElapsedMs: sumTurnTimings(turnTimings),
+          }),
+        };
         log(`[result] ${test.exitCode === 0 && scriptsPassed ? "passed" : "failed"}`);
         return {
           success: test.exitCode === 0 && scriptsPassed,
@@ -240,30 +256,64 @@ export function createAuthoringAgent(subject: {
   };
 }
 
+interface AuthoringToolTiming {
+  readonly command: string;
+  readonly elapsedMs: number;
+  readonly startedAtMs: number;
+}
+
+interface AuthoringTurnTiming {
+  readonly elapsedMs: number;
+  readonly index: number;
+  readonly steps: readonly AuthoringToolTiming[];
+}
+
 async function streamTurn(
   agent: HarnessAgent,
   session: HarnessAgentSession,
   prompt: string,
   timeout: number,
-  abortSignal?: AbortSignal,
-): Promise<AuthoringTurn> {
+  abortSignal: AbortSignal | undefined,
+  verbose: boolean,
+): Promise<AuthoringTurn & { elapsedMs: number; steps: readonly AuthoringToolTiming[] }> {
+  const startedAt = performance.now();
   const result = await agent.stream({ session, prompt, timeout, abortSignal });
+  const toolStarts = new Map<string, { command: string; startedAtMs: number }>();
+  const steps: AuthoringToolTiming[] = [];
   let lineOpen = false;
   for await (const part of result.fullStream) {
     if (part.type === "text-delta") {
-      if (!lineOpen) {
-        process.stdout.write("[assistant] ");
-        lineOpen = true;
+      if (verbose) {
+        if (!lineOpen) {
+          process.stdout.write("[assistant] ");
+          lineOpen = true;
+        }
+        process.stdout.write(part.text);
       }
-      process.stdout.write(part.text);
     } else if (part.type === "tool-call") {
-      if (lineOpen) process.stdout.write("\n");
+      if (verbose && lineOpen) process.stdout.write("\n");
       lineOpen = false;
-      console.log(`[tool] ${formatToolCall(part.toolName, part.input)}`);
+      const command = formatToolCall(part.toolName, part.input);
+      toolStarts.set(part.toolCallId, { command, startedAtMs: performance.now() - startedAt });
+      if (verbose) console.log(`[tool] ${command}`);
+    } else if (part.type === "tool-result") {
+      const tool = toolStarts.get(part.toolCallId);
+      if (tool !== undefined) {
+        steps.push({
+          command: tool.command,
+          elapsedMs: performance.now() - startedAt - tool.startedAtMs,
+          startedAtMs: tool.startedAtMs,
+        });
+      }
     }
   }
-  if (lineOpen) process.stdout.write("\n");
-  return { text: await result.text, toolCalls: await result.toolCalls };
+  if (verbose && lineOpen) process.stdout.write("\n");
+  return {
+    text: await result.text,
+    toolCalls: await result.toolCalls,
+    elapsedMs: performance.now() - startedAt,
+    steps,
+  };
 }
 
 function formatToolCall(name: string, input: unknown): string {
@@ -332,6 +382,10 @@ function setupContext(
 
 async function assertAgentGuidance(context: AuthoringSetupContext): Promise<void> {
   await context.run("test -s AGENTS.md && test -s CLAUDE.md && grep -Fq '@AGENTS.md' CLAUDE.md");
+}
+
+function sumTurnTimings(turns: ReadonlyArray<{ elapsedMs: number }>): number {
+  return turns.reduce((total, turn) => total + turn.elapsedMs, 0);
 }
 
 function shellCommands(toolCalls: ReadonlyArray<{ input: unknown }>): string[] {
