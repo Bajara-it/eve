@@ -35,15 +35,26 @@ pnpm benchmark author-000-imessage \
 ```
 
 The runner archives each subject locally and uploads it to the sandbox. Revisions and local-only
-commits do not need to be pushed. Dependency downloads are cached by lockfile, so source-only
-changes reuse the prepared pnpm store. For one eval and one run, `--verbose` streams setup
-phases, assistant text, tool calls, grading, and build progress.
+commits do not need to be pushed. It maintains two persistent snapshot layers: a dependency
+snapshot keyed by package-manager inputs, and a subject snapshot keyed by the source tree,
+starting point, setup IDs, and bootstrap version. Source-only changes reuse the dependency snapshot
+but create a new subject snapshot. For one eval and one run, `--verbose` streams setup phases,
+assistant text, tool calls, grading, and build progress.
 
 Local runs use the `guided` treatment by default, which keeps the `AGENTS.md` and aliases generated
 by `eve init`. Pass `--treatment baseline` to remove those files before the coding agent starts.
 
 Results are written under `apps/benchmarks/results/`. Each run includes the transcript,
-grader output, summary, and copied project files. Vercel Sandbox and AI Gateway credentials are
+grader output, summary, copied project files, and `project/benchmark/timings.json`. The timing
+artifact records the snapshot-cache outcome, source installation and build phases, workspace setup,
+each user turn with token and tool-call counts, and grading and validation durations. Use it to
+separate sandbox setup time from agent time when comparing runs. Print a compact local report with:
+
+```sh
+pnpm benchmark:timings results/current/<timestamp>/<case>/run-1
+```
+
+Pass `--json` to print the original timing artifact. Vercel Sandbox and AI Gateway credentials are
 required.
 
 ## Publish canonical results
