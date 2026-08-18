@@ -182,7 +182,6 @@ type SlackSessionFailedHandler = (
 export interface SlackPendingApprovalCard {
   readonly messageBlocks: readonly unknown[];
   readonly messageTs: string;
-  readonly userId?: string;
 }
 
 export interface SlackChannelState {
@@ -780,7 +779,8 @@ export function slackChannel(config: SlackChannelConfig = {}): SlackChannel {
       if (typeof cards === "object" && cards !== null) {
         channel.state.pendingApprovalCards = { ...channel.state.pendingApprovalCards, ...cards };
       }
-      const responders = payload.approvalResponderUsers;
+      const responders = (payload.state as Partial<SlackChannelState> | undefined)
+        ?.approvalResponderUsers;
       if (typeof responders === "object" && responders !== null) {
         channel.state.approvalResponderUsers = {
           ...channel.state.approvalResponderUsers,
