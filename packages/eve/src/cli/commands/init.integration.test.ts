@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { MockScreen } from "#cli/dev/tui/test/mock-terminal.js";
 import { stripAnsi } from "#cli/ui/terminal-text.js";
+import { packageInstallResult, packageProcessResult } from "#internal/testing/package-process.js";
 import { DEFAULT_AGENT_MODEL_ID } from "#shared/default-agent-model.js";
 import { detectPackageManager } from "#setup/package-manager.js";
 import {
@@ -111,10 +112,10 @@ function dependencies(
         ...options,
         webPackageVersions: { ...WEB_VERSIONS, ...options.webPackageVersions },
       }),
-    runPackageManagerInstall: vi.fn(async () => true),
+    runPackageManagerInstall: vi.fn(async () => packageInstallResult()),
     selectInitHandoff: vi.fn(async () => "eve-dev"),
     spawnCodingAgentRepl: vi.fn(async () => true),
-    spawnPackageManager: vi.fn(async () => true),
+    spawnPackageManager: vi.fn(async () => packageProcessResult()),
     tryInitializeGit: vi.fn(async () => gitResult),
     validateModelSlug: vi.fn(async () => null),
   };
@@ -953,7 +954,7 @@ describe("runInitCommand", () => {
     await mkdir(projectRoot, { recursive: true });
     const output = logger();
     const deps = dependencies();
-    deps.runPackageManagerInstall.mockResolvedValue(false);
+    deps.runPackageManagerInstall.mockResolvedValue(packageInstallResult(1));
 
     await expect(runInitCommand(output, projectRoot, ".", {}, deps)).rejects.toThrow("restored");
 
@@ -1184,7 +1185,7 @@ describe("runInitCommand", () => {
     deps.runPackageManagerInstall.mockImplementation(async (_kind, _projectPath, options) => {
       options?.onOutput?.({ stream: "stdout", text: "Packages: +12" });
       options?.onOutput?.({ stream: "stderr", text: "ERR_PNPM_FETCH_404 not found" });
-      return false;
+      return packageInstallResult(1);
     });
 
     await expect(runInitCommand(output, parentDirectory, "my-agent", {}, deps)).rejects.toThrow(
@@ -1213,12 +1214,32 @@ describe("runInitCommand", () => {
     );
   });
 
+  it("prints a spawn failure when installation produces no child output", async () => {
+    const parentDirectory = await mkdtemp(join(tmpdir(), "eve-init-spawn-fail-"));
+    const output = logger();
+    const deps = dependencies();
+    deps.runPackageManagerInstall.mockResolvedValue({
+      kind: "installed",
+      result: {
+        command: { executable: "pnpm", args: ["install"], cwd: parentDirectory },
+        termination: { kind: "spawn-error", code: "ENOENT", message: "spawn pnpm ENOENT" },
+        stdout: "",
+      },
+    });
+
+    await expect(runInitCommand(output, parentDirectory, "my-agent", {}, deps)).rejects.toThrow(
+      "Failed to install dependencies",
+    );
+
+    expect(output.errors).toEqual(["pnpm was not found. Install it before running this step."]);
+  });
+
   it("preserves an existing host after install failure and prints the retry command", async () => {
     const parentDirectory = await mkdtemp(join(tmpdir(), "eve-init-host-install-fail-"));
     const projectRoot = await createHostProject(parentDirectory);
     const output = logger();
     const deps = dependencies();
-    deps.runPackageManagerInstall.mockResolvedValue(false);
+    deps.runPackageManagerInstall.mockResolvedValue(packageInstallResult(1));
 
     await expect(runInitCommand(output, projectRoot, ".", {}, deps)).rejects.toThrow(
       `install dependencies with pnpm in "${projectRoot}"`,
@@ -1247,7 +1268,7 @@ describe("runInitCommand", () => {
         stream: "stderr",
         text: "npm error ERESOLVE unable to resolve dependency tree",
       });
-      return false;
+      return packageInstallResult(1);
     });
 
     await expect(runInitCommand(output, parentDirectory, "my-agent", {}, deps)).rejects.toThrow(
@@ -1270,7 +1291,7 @@ describe("runInitCommand", () => {
         options?.onOutput?.({ stream: "stderr", text: `npm silly step ${index}` });
       }
       options?.onOutput?.({ stream: "stderr", text: "" });
-      return false;
+      return packageInstallResult(1);
     });
 
     await expect(runInitCommand(output, parentDirectory, "my-agent", {}, deps)).rejects.toThrow(
@@ -1288,7 +1309,7 @@ describe("runInitCommand", () => {
     const deps = dependencies();
     deps.runPackageManagerInstall.mockImplementation(async (_kind, _projectPath, options) => {
       options?.onOutput?.({ stream: "stdout", text: "Progress: resolved 62, reused 62, done" });
-      return true;
+      return packageInstallResult();
     });
 
     const previous = process.env.EVE_LOG_LEVEL;
@@ -1322,7 +1343,7 @@ describe("runInitCommand", () => {
     const parentDirectory = await mkdtemp(join(tmpdir(), "eve-init-debug-failure-"));
     const output = logger();
     const deps = dependencies();
-    deps.runPackageManagerInstall.mockResolvedValue(false);
+    deps.runPackageManagerInstall.mockResolvedValue(packageInstallResult(1));
 
     const previous = process.env.EVE_LOG_LEVEL;
     process.env.EVE_LOG_LEVEL = "debug";
@@ -1374,7 +1395,7 @@ describe("runInitCommand", () => {
         text: "npm http fetch GET https://registry.npmjs.org/@vercel%2fconnect attempt 1 failed with ENOTFOUND",
       });
       options?.onOutput?.({ stream: "stdout", text: `Downloading ${"package".repeat(20)}` });
-      return true;
+      return packageInstallResult();
     });
 
     try {
