@@ -41,6 +41,7 @@ import {
 } from "#setup/scaffold/create/project.js";
 
 import { initAgentDevHandoff, initAgentReplPrompt } from "./agent-instructions.js";
+import { initAgentReadySummary } from "./agent-instructions.js";
 import { confirmInitInNonEmptyDirectory } from "./init-confirm.js";
 import {
   cleanupFreshInitTarget,
@@ -628,6 +629,7 @@ export async function runInitCommand(
   });
 
   if (result.agentLaunched) {
+    logger.log(initAgentReadySummary(options.model, result.projectPath));
     logger.log(agentHandoff);
     return;
   }
