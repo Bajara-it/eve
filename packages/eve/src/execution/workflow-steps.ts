@@ -17,7 +17,6 @@ import {
 } from "#context/dynamic-subagent-lifecycle.js";
 import {
   dispatchDynamicToolEvent,
-  hydrateDynamicSessionTools,
   refreshDynamicSessionToolsForRuntimeRevision,
 } from "#context/dynamic-tool-lifecycle.js";
 import {
@@ -378,12 +377,6 @@ export async function turnStep(rawInput: TurnStepInput): Promise<DurableStepResu
           runtimeRevision: dynamicRuntimeRevision,
         }),
       ]);
-      await hydrateDynamicSessionTools({
-        ctx,
-        resolvers: dynamicToolResolvers,
-        event: refreshEvent,
-        messages: history.initial.messages,
-      });
     }
   } catch (error) {
     await failChannelDeliveries(error);

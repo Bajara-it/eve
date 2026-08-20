@@ -44,6 +44,10 @@ import { dispatchTurnStep } from "#execution/dispatch-turn-step.js";
 import { projectToDurableSession } from "#execution/session.js";
 import { buildRuntimeIdentity, createExecutionNodeStep } from "#execution/node-step.js";
 import { defineTool } from "#public/definitions/tool.js";
+import {
+  registerDurableDynamicCallback,
+  stampDurableDynamicCallback,
+} from "#shared/durable-dynamic-tool-callbacks.js";
 import { dispatchRuntimeActionsStep } from "#execution/dispatch-runtime-actions-step.js";
 import { runProxySubagentEventStep } from "#execution/subagent-event-proxy-step.js";
 import { readLatestTaskView, sendTaskInboundPayload } from "#execution/tasks/parent/run-parent.js";
@@ -1563,109 +1567,6 @@ describe("turnStep", () => {
     expect(workflowWritesByNamespace.get(DEFAULT_WORKFLOW_STREAM_NAMESPACE) ?? []).toEqual([]);
   });
 
-  it("hydrates resumed dynamic tool callbacks from projected history", async () => {
-    const hidden = { content: "HIDE_FROM_HYDRATION", role: "user" as const };
-    mockIdentityHistoryViewProjector.mockImplementation(({ messages }) =>
-      messages.filter((message) => message !== hidden),
-    );
-    const handler = vi.fn(
-      (_event: unknown, _context: { readonly messages: readonly ModelMessage[] }) => ({
-        hydrated: defineTool({
-          description: "Hydrated tool",
-          execute: async () => "ok",
-          inputSchema: { type: "object" },
-        }),
-      }),
-    );
-    const resolverSlug = "hydration_projection";
-    const compiledBundle = {
-      adapterRegistry: {
-        adaptersByKind: new Map([[threadContextAdapter.kind, threadContextAdapter]]),
-      },
-      compiledArtifactsSource: {} as never,
-      graph: {
-        nodesByNodeId: new Map(),
-        root: { sandboxRegistry: { sandbox: null }, turnAgent: TestTurnAgent },
-      },
-      moduleMap: { nodes: {} },
-      hookRegistry: createEmptyHookRegistry(),
-      resolvedAgent: {
-        config: {},
-        dynamicToolResolvers: [
-          {
-            eventNames: ["session.started"],
-            events: { "session.started": handler },
-            logicalPath: "agent/tools/hydration.ts",
-            slug: resolverSlug,
-            sourceId: "test:hydration",
-            sourceKind: "module",
-          },
-        ],
-      },
-      subagentRegistry: {},
-      toolRegistry: {},
-      turnAgent: TestTurnAgent,
-    } as never;
-    vi.mocked(getCompiledRuntimeAgentBundle).mockResolvedValue(compiledBundle);
-    installSessionStoreMocks([
-      createStubSession({
-        history: [{ content: "visible", role: "user" }, hidden],
-        state: {
-          "eve.harness.emission": {
-            sequence: 1,
-            sessionStarted: true,
-            stepIndex: 0,
-            turnId: "",
-          },
-        },
-      }),
-    ]);
-    vi.mocked(createExecutionNodeStep).mockImplementation(() => async (session) => ({
-      next: { done: true, output: "ok" },
-      session,
-    }));
-    vi.stubEnv("VERCEL_DEPLOYMENT_ID", "dpl_same");
-
-    const ctx = new ContextContainer();
-    ctx.set(AuthKey, null);
-    ctx.set(BundleKey, compiledBundle);
-    ctx.set(ChannelKey, threadContextAdapter);
-    ctx.set(ContinuationTokenKey, "http:thread-context");
-    ctx.set(ModeKey, "conversation");
-    ctx.set(SessionIdKey, "session-1");
-    ctx.set(SessionDynamicToolRuntimeRevisionKey, "deployment:dpl_same");
-    ctx.set(SessionDynamicToolMetadataKey, [
-      {
-        closureVars: {},
-        description: "Hydrated tool",
-        entryKey: "hydrated",
-        executeStepFnName: `eve:framework-dynamic:session-1:${resolverSlug}:hydrated`,
-        inputSchema: { type: "object" },
-        name: "hydrated",
-        resolverSlug,
-      },
-    ]);
-
-    await turnStep({
-      input: { kind: "deliver", payloads: [{ message: "continue" }] },
-      parentWritable: createTestWritable(),
-      serializedContext: serializeContext(ctx),
-      sessionState: createStubSessionState({
-        emissionState: {
-          sequence: 1,
-          sessionStarted: true,
-          stepIndex: 0,
-          turnId: "",
-        },
-      }),
-    });
-
-    expect(handler).toHaveBeenCalledOnce();
-    expect(handler.mock.calls[0]?.[1]).toMatchObject({
-      messages: [{ content: "visible", role: "user" }],
-    });
-  });
-
   it("routes remote task HITL only to the parent callback", async () => {
     const inputRequested = vi.fn();
     const remoteTaskAdapter: ChannelAdapter = {
@@ -2600,14 +2501,24 @@ describe("turnStep", () => {
         originalClearVirtualContext.call(this);
       },
     );
+    const approval = stampDurableDynamicCallback(() => "not-applicable" as const, {
+      closure: {},
+      stepId: "test:current-tool/approval",
+    });
+    const execute = stampDurableDynamicCallback(async () => ({ ok: true }), {
+      closure: {},
+      stepId: "test:current-tool/execute",
+    });
+    registerDurableDynamicCallback("test:current-tool/approval", () => "not-applicable");
+    registerDurableDynamicCallback("test:current-tool/execute", async () => ({ ok: true }));
     const handler = vi.fn(() => {
       lifecycleOrder.push("refresh");
       return {
         current_tool: defineTool({
           description: "Current deployment tool",
           inputSchema: { type: "object" },
-          approval: () => "not-applicable" as const,
-          execute: async () => ({ ok: true }),
+          approval,
+          execute,
         }),
       };
     });
@@ -2675,10 +2586,11 @@ describe("turnStep", () => {
     ctx.set(SessionDynamicToolRuntimeRevisionKey, "deployment:dpl_old");
     ctx.set(SessionDynamicToolMetadataKey, [
       {
-        closureVars: {},
+        callbacks: {
+          execute: { closure: {}, stepId: "eve:dynamic-tool//old" },
+        },
         description: "Stale deployment tool",
         entryKey: "old_tool",
-        executeStepFnName: "eve:dynamic-tool//old",
         inputSchema: { type: "object" },
         name: "old_tool",
         resolverSlug: "old",
