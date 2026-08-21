@@ -171,7 +171,11 @@ import {
 import { getInstrumentationConfig } from "#harness/instrumentation/config.js";
 import { getInstrumentationRuntime } from "#harness/instrumentation/runtime.js";
 import type { OtelHarnessSettings } from "#tracing/otel-declaration.js";
-import { normalizeUserContent, resolveAssistantStepText } from "#harness/messages.js";
+import {
+  normalizeModelMessages,
+  normalizeUserContent,
+  resolveAssistantStepText,
+} from "#harness/messages.js";
 import { normalizeProviderToolHistory } from "#harness/provider-tool-history.js";
 import {
   type AuthorizationSignal,
@@ -203,6 +207,10 @@ import {
   EMPTY_DELIVERY_SENTINEL,
   hasEmptyDeliverySentinel,
 } from "#shared/empty-delivery.js";
+import {
+  TASK_DELIVERY_PENDING_INSTRUCTION,
+  TASK_DELIVERY_SETTLED_INSTRUCTION,
+} from "#tasks/delivery-context.js";
 import { extractWorkflowStreamWriteErrorDetails } from "#harness/workflow-stream-error.js";
 import {
   ensureOtelIntegration,
@@ -1264,7 +1272,7 @@ export function createToolLoopHarness(config: ToolLoopHarnessConfig): StepFn {
     if (compaction.compacted) {
       messages = compaction.messages;
     }
-    projectedMessages = projectHistory(messages, session.state);
+    projectedMessages = normalizeModelMessages(projectHistory(messages, session.state));
 
     if (emit) {
       await emitStepStarted(
@@ -1274,9 +1282,9 @@ export function createToolLoopHarness(config: ToolLoopHarnessConfig): StepFn {
         projectedMessages,
       );
     }
-
     const approvedTools = getApprovedTools(session);
 
+    const taskDeliveryPhase = ctx?.get(TurnTaskDeliveryKey);
     const emptyDeliveryEnabled =
       // A structured-output run must always produce its declared result.
       session.outputSchema === undefined &&
@@ -1287,7 +1295,8 @@ export function createToolLoopHarness(config: ToolLoopHarnessConfig): StepFn {
       // A schedule-initiated root turn may have nothing worth delivering.
       (isScheduleAppAuth(ctx.get(AuthKey)) ||
         // A task-notification root turn may act on the wake without messaging the user.
-        ctx.get(TurnTaskDeliveryKey) === true);
+        taskDeliveryPhase === "pending" ||
+        taskDeliveryPhase === "settled");
 
     // --- Execute via ToolLoopAgent ------------------------------------------
 
@@ -1321,7 +1330,16 @@ export function createToolLoopHarness(config: ToolLoopHarnessConfig): StepFn {
       }
     }
     if (emptyDeliveryEnabled) {
-      systemMessages.push({ role: "system", content: CONDITIONAL_DELIVERY_INSTRUCTION });
+      const deliveryInstruction =
+        taskDeliveryPhase === "pending"
+          ? TASK_DELIVERY_PENDING_INSTRUCTION
+          : taskDeliveryPhase === "settled"
+            ? TASK_DELIVERY_SETTLED_INSTRUCTION
+            : CONDITIONAL_DELIVERY_INSTRUCTION;
+      systemMessages.push({
+        role: "system",
+        content: deliveryInstruction,
+      });
     }
 
     const modelMessages = nonSystemMessages;

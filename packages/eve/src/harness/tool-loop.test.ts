@@ -71,6 +71,10 @@ import {
   CONDITIONAL_DELIVERY_INSTRUCTION,
   EMPTY_DELIVERY_SENTINEL,
 } from "#shared/empty-delivery.js";
+import {
+  TASK_DELIVERY_PENDING_INSTRUCTION,
+  TASK_DELIVERY_SETTLED_INSTRUCTION,
+} from "#tasks/delivery-context.js";
 
 vi.mock("ai", () => ({
   ToolLoopAgent: vi.fn(),
@@ -822,37 +826,78 @@ describe("createToolLoopHarness", () => {
     }
   });
 
-  it("parks without delivery when a terminal response contains the empty-delivery sentinel", async () => {
+  it("removes blank text blocks from persisted history before the provider call", async () => {
     setupMockAgent({
       finishReason: "stop",
-      response: {
-        messages: [
-          {
-            content: `internal ${EMPTY_DELIVERY_SENTINEL} trailing`,
-            role: "assistant",
-          },
-        ],
-      },
-      text: `internal ${EMPTY_DELIVERY_SENTINEL} trailing`,
+      response: { messages: [{ content: "Hello!", role: "assistant" }] },
+      text: "Hello!",
       toolCalls: [],
       toolResults: [],
     });
 
-    const { emit, events } = createEventCollector();
-    const runStep = createToolLoopHarness(createTestConfig("conversation", emit));
-
-    const result = await runStep(createTestSession(), { message: "Hi" });
-
-    expect(result.next).toBeNull();
-    expect(result.session.history).toEqual([{ content: "Hi", role: "user" }]);
-    expect(vi.mocked(ToolLoopAgent).mock.calls.length).toBe(1);
-    expect(events).toContainEqual(
-      expect.objectContaining({
-        data: expect.objectContaining({ message: null }),
-        type: "message.completed",
+    const runStep = createToolLoopHarness(createTestConfig("conversation"));
+    await runStep(
+      createTestSession({
+        history: [
+          { content: " ", role: "assistant" },
+          {
+            content: [
+              { text: "", type: "text" },
+              { text: "Previous reply", type: "text" },
+            ],
+            role: "assistant",
+          },
+        ],
       }),
+      { message: "Continue" },
     );
+
+    const agent = vi.mocked(ToolLoopAgent).mock.results[0]?.value as {
+      generate: ReturnType<typeof vi.fn>;
+    };
+    expect(agent.generate.mock.calls[0]?.[0].messages).toEqual([
+      { content: [{ text: "Previous reply", type: "text" }], role: "assistant" },
+      { content: "Continue", role: "user" },
+    ]);
   });
+
+  it.each([
+    ["literal", EMPTY_DELIVERY_SENTINEL],
+    ["HTML-escaped", "&lt;eve-empty-delivery/&gt;"],
+  ])(
+    "parks without delivery when a terminal response contains the %s sentinel",
+    async (_, sentinel) => {
+      setupMockAgent({
+        finishReason: "stop",
+        response: {
+          messages: [
+            {
+              content: `internal ${sentinel} trailing`,
+              role: "assistant",
+            },
+          ],
+        },
+        text: `internal ${sentinel} trailing`,
+        toolCalls: [],
+        toolResults: [],
+      });
+
+      const { emit, events } = createEventCollector();
+      const runStep = createToolLoopHarness(createTestConfig("conversation", emit));
+
+      const result = await runStep(createTestSession(), { message: "Hi" });
+
+      expect(result.next).toBeNull();
+      expect(result.session.history).toEqual([{ content: "Hi", role: "user" }]);
+      expect(vi.mocked(ToolLoopAgent).mock.calls.length).toBe(1);
+      expect(events).toContainEqual(
+        expect.objectContaining({
+          data: expect.objectContaining({ message: null }),
+          type: "message.completed",
+        }),
+      );
+    },
+  );
 
   it("keeps executable tools directly available to the model", async () => {
     setupMockAgent({
@@ -11268,22 +11313,28 @@ describe("createToolLoopHarness", () => {
       expect(instructions).toBe("You are a test assistant.");
     });
 
-    it("adds conditional-delivery guidance to a top-level framework wake", async () => {
-      setupMockAgent(defaultModelResult());
-      const runStep = createToolLoopHarness(createTestConfig("conversation"));
-      const ctx = new ContextContainer();
-      ctx.set(TurnTaskDeliveryKey, true);
+    it.each([
+      ["pending", TASK_DELIVERY_PENDING_INSTRUCTION],
+      ["settled", TASK_DELIVERY_SETTLED_INSTRUCTION],
+    ] as const)(
+      "adds %s task-delivery guidance to a top-level framework wake",
+      async (phase, instruction) => {
+        setupMockAgent(defaultModelResult());
+        const runStep = createToolLoopHarness(createTestConfig("conversation"));
+        const ctx = new ContextContainer();
+        ctx.set(TurnTaskDeliveryKey, phase);
 
-      await contextStorage.run(ctx, () =>
-        runStep(createTestSession(), { message: "Background task task_1 is completed." }),
-      );
+        await contextStorage.run(ctx, () =>
+          runStep(createTestSession(), { message: "Background task task_1 is completed." }),
+        );
 
-      const { instructions } = getLastAgentSettings();
-      expect(instructions).toEqual({
-        role: "system",
-        content: `You are a test assistant.\n\n${CONDITIONAL_DELIVERY_INSTRUCTION}`,
-      });
-    });
+        const { instructions } = getLastAgentSettings();
+        expect(instructions).toEqual({
+          role: "system",
+          content: `You are a test assistant.\n\n${instruction}`,
+        });
+      },
+    );
 
     it("does not add conditional-delivery guidance to a human continuation", async () => {
       setupMockAgent(defaultModelResult());
@@ -11308,7 +11359,7 @@ describe("createToolLoopHarness", () => {
       setupMockAgent(defaultModelResult());
       const runStep = createToolLoopHarness(createTestConfig("conversation"));
       const ctx = new ContextContainer();
-      ctx.set(TurnTaskDeliveryKey, true);
+      ctx.set(TurnTaskDeliveryKey, "pending");
       setDelegatedParent(ctx);
 
       await contextStorage.run(ctx, () =>
