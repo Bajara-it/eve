@@ -19,13 +19,17 @@ import { isAsyncIterable } from "#shared/async-iterable.js";
 import { parseJsonValue } from "#shared/json.js";
 import type { ToolExecuteOptions } from "#shared/tool-definition.js";
 import { createTaskDelegated, isTaskDelegated, type TaskExec } from "#shared/tool-task.js";
+import { recordTaskAgentAddress } from "#harness/handles/transitions.js";
+import { BundleKey, type CompiledBundle } from "#runtime/sessions/runtime-context-keys.js";
 import { recordSessionTask } from "#tasks/session-index.js";
+import { readSubagentExecutor } from "#tasks/types.js";
 import { createWorkflowCallbackUrl } from "#execution/workflow-callback-url.js";
 import {
   beginBackgroundTask,
   rejectDelegatedDispatch,
   type BackgroundTask,
 } from "#execution/tasks/parent/delegate.js";
+import { propagateSubagentExecutorCancel } from "#execution/tasks/parent/dispatch.js";
 import { sendTaskCommand } from "#execution/tasks/parent/run-parent.js";
 
 interface BackgroundToolExecutionRecord {
@@ -62,7 +66,8 @@ export function runBackgroundStep(
  *
  * - `commit` — step succeeded. Compensates executions that never settled
  *   (the tool neither delegated nor completed its task), then records the
- *   spawned task handles onto the session being persisted.
+ *   task entries and executor-owned session writes onto the session being
+ *   persisted.
  * - `rollback` — step failed. Compensates incomplete executions, and settled
  *   ones too — unless the cause is turn cancellation: those tasks are already
  *   running, so they are retained for {@link readRetainedBackgroundToolResult}
@@ -73,8 +78,8 @@ export function runBackgroundStep(
  */
 export const backgroundToolExecutionProvider: FrameworkContextProvider<BackgroundToolExecutor> = {
   key: BackgroundToolExecutorKey,
-  create(_ctx, session) {
-    return { value: new BackgroundToolExecutionScope(session) };
+  create(ctx, session) {
+    return { value: new BackgroundToolExecutionScope(session, ctx.get(BundleKey)) };
   },
   async commit(executor, session) {
     return await requireExecutionScope(executor).commit(session);
@@ -88,9 +93,9 @@ export const backgroundToolExecutionProvider: FrameworkContextProvider<Backgroun
 };
 
 /**
- * Returns what a successful commit would have produced (session with spawned
- * task handles recorded) when turn cancellation raced a
- * successfully delegated task. `rollback` deliberately does not compensate
+ * Returns what a successful commit would have produced (session with task
+ * entries and executor session writes applied) when turn cancellation raced
+ * a successfully delegated task. `rollback` deliberately does not compensate
  * settled records on cancellation — that would kill already-running tasks —
  * so the cancellation epilogue reads this instead to keep those tasks tracked
  * in durable state rather than orphaned. `undefined` when nothing was retained.
@@ -103,13 +108,15 @@ export function readRetainedBackgroundToolResult(
 }
 
 class BackgroundToolExecutionScope implements BackgroundToolExecutor {
+  private readonly bundle: CompiledBundle | undefined;
   private readonly executions = new Map<string, Promise<unknown>>();
   private readonly records: BackgroundToolExecutionRecord[] = [];
   private retained = false;
 
   private readonly initialSession: HarnessSession;
 
-  constructor(initialSession: HarnessSession) {
+  constructor(initialSession: HarnessSession, bundle: CompiledBundle | undefined) {
+    this.bundle = bundle;
     this.initialSession = initialSession;
   }
 
@@ -137,6 +144,7 @@ class BackgroundToolExecutionScope implements BackgroundToolExecutor {
       await compensateBackgroundToolExecution(
         incomplete,
         new Error("Background tool execution did not delegate or complete its task."),
+        this.bundle,
       );
     }
     return this.apply(session);
@@ -151,7 +159,7 @@ class BackgroundToolExecutionScope implements BackgroundToolExecutor {
     const settled = this.records.filter((record) => record.settled);
     const incomplete = this.records.filter((record) => !record.settled);
     if (incomplete.length > 0) {
-      await compensateBackgroundToolExecution(incomplete, cause);
+      await compensateBackgroundToolExecution(incomplete, cause, this.bundle);
     }
     if (settled.length === 0) return;
     // Cancellation must not compensate settled records: their tasks are
@@ -160,7 +168,7 @@ class BackgroundToolExecutionScope implements BackgroundToolExecutor {
       this.retained = true;
       return;
     }
-    await compensateBackgroundToolExecution(settled, cause);
+    await compensateBackgroundToolExecution(settled, cause, this.bundle);
   }
 
   retainedResult(): BackgroundToolStepResult | undefined {
@@ -171,6 +179,12 @@ class BackgroundToolExecutionScope implements BackgroundToolExecutor {
     let next = session;
     for (const record of this.records) {
       if (!record.settled || record.task === undefined) continue;
+      // Framework-owned executor commits, matched by executor kind. The
+      // subagent binding is the durable copy of the child's addressed
+      // handle; committing the task also commits that address into the
+      // parent's handle store.
+      const subagent = readSubagentExecutor(record.task.executor);
+      if (subagent !== undefined) next = recordTaskAgentAddress(next, subagent);
       next = recordSessionTask(next, record.task);
     }
     return next;
@@ -274,6 +288,7 @@ async function deliverTaskCommand(
 async function compensateBackgroundToolExecution(
   records: readonly BackgroundToolExecutionRecord[],
   cause: unknown,
+  bundle: CompiledBundle | undefined,
 ): Promise<void> {
   const failures: unknown[] = [];
   for (const record of records.toReversed()) {
@@ -289,11 +304,22 @@ async function compensateBackgroundToolExecution(
     } catch (error) {
       failures.push(error);
     }
+    // Reject first so the task is terminal and a late child result cannot
+    // revive it, then best-effort abort the already-dispatched child using
+    // the address carried on its durable executor binding.
+    const subagent = readSubagentExecutor(record.task.executor);
+    if (subagent !== undefined) {
+      await propagateSubagentExecutorCancel({
+        bundle,
+        executor: subagent,
+        taskId: record.task.taskId,
+      });
+    }
   }
   if (failures.length > 0) {
     throw new AggregateError(
       [cause, ...failures],
-      "Background tool execution failed and its tasks could not all be compensated.",
+      "Background tool execution failed and its tasks could not all be rejected.",
       { cause },
     );
   }
