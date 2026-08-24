@@ -1592,7 +1592,6 @@ export function createToolLoopHarness(config: ToolLoopHarnessConfig): StepFn {
           bridgeIntegration,
         ),
         toolApproval: buildToolApproval(modelTools),
-        toolChoice: hasPendingApprovalBatch(session) ? ("none" as const) : undefined,
         tools: effectiveTools,
       };
       const agent = new ToolLoopAgent(agentSettings);
