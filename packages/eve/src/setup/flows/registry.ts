@@ -1,3 +1,4 @@
+import { z } from "#compiled/zod/index.js";
 import type { RegistryCatalogItem } from "#cli/commands/registry.js";
 import type {
   Prompter,
@@ -162,10 +163,31 @@ function manifestRecord(manifest: unknown): Record<string, unknown> {
     : {};
 }
 
+const RegistryDocumentationSchema = z.object({
+  meta: z
+    .object({
+      eve: z.object({ docs: z.string().min(1).optional() }).optional(),
+    })
+    .optional(),
+});
+
+function documentationLink(manifest: Record<string, unknown>): string | undefined {
+  const docs = RegistryDocumentationSchema.safeParse(manifest).data?.meta?.eve?.docs;
+  if (docs === undefined) return undefined;
+  return docs.startsWith("/") ? `https://eve.dev${docs}` : docs;
+}
+
 function summarizeDetails(values: readonly string[], limit = 3): string {
   const visible = values.slice(0, limit);
   const remaining = values.length - visible.length;
   return remaining > 0 ? `${visible.join(", ")} … (+${remaining} more)` : visible.join(", ");
+}
+
+function environmentVariables(manifest: Record<string, unknown>): string[] {
+  const envVars = manifest.envVars;
+  return typeof envVars === "object" && envVars !== null && !Array.isArray(envVars)
+    ? Object.keys(envVars)
+    : [];
 }
 
 function itemDetails(
@@ -180,10 +202,9 @@ function itemDetails(
   ];
   if (dependencies.length > 0)
     details.push({ label: "Packages", value: summarizeDetails(dependencies) });
-  const envVars = manifest.envVars;
-  if (typeof envVars === "object" && envVars !== null && !Array.isArray(envVars)) {
-    const names = Object.keys(envVars);
-    if (names.length > 0) details.push({ label: "Environment", value: summarizeDetails(names) });
+  const environment = environmentVariables(manifest);
+  if (environment.length > 0) {
+    details.push({ label: "Environment", value: summarizeDetails(environment) });
   }
   const files = Array.isArray(manifest.files) ? manifest.files : [];
   const targets = files.flatMap((file) => {
@@ -206,6 +227,8 @@ async function inspectItem(
   | {
       kind: "added";
       output: readonly string[];
+      documentation?: string;
+      environment?: readonly string[];
       setup?: Awaited<ReturnType<RegistryFlowDeps["installRegistryItem"]>>["setup"];
     }
   | { kind: "back" }
@@ -241,7 +264,12 @@ async function inspectItem(
           signal,
         });
       const result = await (prompter.withExclusiveTerminal?.(install) ?? install());
-      return { kind: "added", ...result };
+      return {
+        kind: "added",
+        documentation: documentationLink(manifest),
+        environment: environmentVariables(manifest),
+        ...result,
+      };
     } finally {
       spinner?.stop();
     }
@@ -288,7 +316,14 @@ async function offerItem(
     input.signal,
   );
   if (inspected.kind !== "added") return undefined;
-  session.add(item.address, itemLabel(item), inspected.output, inspected.setup);
+  const output = [...inspected.output];
+  if (inspected.environment !== undefined && inspected.environment.length > 0) {
+    output.push(`Environment: ${inspected.environment.join(", ")}`);
+  }
+  if (inspected.documentation !== undefined) {
+    output.push(`Setup: ${inspected.documentation}`);
+  }
+  session.add(item.address, itemLabel(item), output, inspected.setup);
   const next = await session.continueAfterInstall({
     appRoot: input.appRoot,
     prompter: input.prompter,
