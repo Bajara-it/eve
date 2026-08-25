@@ -121,4 +121,18 @@ describe("compiled agent manifest v43", () => {
       "subagent graph contains a cycle",
     );
   });
+
+  it("rejects the removed persistent-session field in compiled manifests", async () => {
+    const { manifest } = await compileFromMemory({ model: "openai/gpt-5.4" });
+
+    expect(() =>
+      compiledAgentManifestSchema.parse({
+        ...manifest,
+        config: {
+          ...manifest.config,
+          experimental: { subagentPersistentSessions: true },
+        },
+      }),
+    ).toThrow();
+  });
 });

@@ -1100,7 +1100,8 @@ and v3 inspection metadata. The compiler diagnostic artifact moves from
 version 1 to version 2 in the same PR. Disk and bundled loaders reject
 earlier serialized shapes rather than repairing them. The complete version 42
 schema, its single semantic validator, and serialization fixtures land first
-inside the PR, and the serialized shape does not change again within it. Kernel preparation
+inside the PR, and the serialized shape does not change again within it; the
+same rule applies to version 44 in PR 2. Kernel preparation
 switches from catalog membership to slot survival: a capability prepares only
 when its canonical source survived composition, and agent-info v3 derives its
 prepared kernel entries from that survival plus the static kind mapping.

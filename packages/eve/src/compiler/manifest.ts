@@ -586,7 +586,6 @@ const compiledAgentConfigBaseFields = {
   experimental: z
     .object({
       instrumentationProviders: z.boolean().optional(),
-      subagentPersistentSessions: z.boolean().optional(),
       tasks: z.boolean().optional(),
       workflow: compiledAgentWorkflowDefinitionSchema.optional(),
     })
@@ -1112,7 +1111,6 @@ function cloneCompiledAgentDefinition(config: CompiledAgentDefinition): Compiled
         ? undefined
         : {
             instrumentationProviders: config.experimental.instrumentationProviders,
-            subagentPersistentSessions: config.experimental.subagentPersistentSessions,
             tasks: config.experimental.tasks,
             workflow:
               config.experimental.workflow === undefined

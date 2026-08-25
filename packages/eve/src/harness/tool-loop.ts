@@ -1202,16 +1202,18 @@ export function createToolLoopHarness(config: ToolLoopHarnessConfig): StepFn {
     // results, keeping the request user-final for providers that reject
     // assistant-final histories. See resolveAgentsAnnouncement for the role
     // rationale (assistant-final rejection, prompt-cache preservation).
-    if (config.persistentSubagentSessions === true) {
-      const store = getAgentHandleStore(session.state);
-      if (store?.handles.some((handle) => handle.phase === "addressed") !== true) {
-        const announcement = resolveAgentsAnnouncement({
-          messages: projectHistory(messages, session.state),
-          store,
-        });
-        if (announcement !== undefined) {
-          messages.push({ content: announcement, role: "user" });
-        }
+    const agentStore = getAgentHandleStore(session.state);
+    if (
+      agentStore !== undefined &&
+      !hasUnansweredToolCall(messages) &&
+      agentStore.handles.some((handle) => handle.phase === "addressed") !== true
+    ) {
+      const announcement = resolveAgentsAnnouncement({
+        messages: projectHistory(messages, session.state),
+        store: agentStore,
+      });
+      if (announcement !== undefined) {
+        messages.push({ content: announcement, role: "user" });
       }
     }
 
@@ -1944,6 +1946,7 @@ export function createToolLoopHarness(config: ToolLoopHarnessConfig): StepFn {
           message: errorMessage,
         });
         const settledTurn = { isError: true, output: taskFailureOutput } satisfies SettledTurn;
+        session = { ...session, outputSchema: undefined };
         return {
           next: null,
           session: setHarnessEmissionState(session, emissionState),
@@ -2333,6 +2336,26 @@ function extractToolResultCallIds(messages: readonly StepResponseMessage[]): Rea
   }
 
   return callIds;
+}
+
+/** True when provider history still owes a result for any assistant tool call. */
+function hasUnansweredToolCall(messages: readonly ModelMessage[]): boolean {
+  const callIds = new Set<string>();
+  const resultIds = new Set<string>();
+
+  for (const message of messages) {
+    if (!Array.isArray(message.content)) continue;
+    for (const part of message.content) {
+      if (typeof part !== "object" || part === null) continue;
+      if (part.type === "tool-call") callIds.add(part.toolCallId);
+      if (part.type === "tool-result") resultIds.add(part.toolCallId);
+    }
+  }
+
+  for (const callId of callIds) {
+    if (!resultIds.has(callId)) return true;
+  }
+  return false;
 }
 
 /**
@@ -2958,6 +2981,8 @@ async function finishTaskTurn(input: {
 
   const structured = extractFinalOutput(result);
   if (structured === undefined) {
+    // The schema belongs to the settled invocation.
+    session = { ...session, outputSchema: undefined };
     if (emit) {
       await emitFailedStep(emit, emissionState, {
         ...OUTPUT_SCHEMA_NOT_FULFILLED,
@@ -3006,6 +3031,9 @@ async function finishConversationTurn(input: {
 
   const structured = extractFinalOutput(result);
   if (structured === undefined) {
+    // The schema belongs to the settled turn. A later conversation turn that
+    // omits outputSchema must not inherit a failed turn's contract.
+    session = { ...session, outputSchema: undefined };
     if (emit) {
       emissionState = await emitRecoverableFailedTurn(emit, emissionState, {
         ...OUTPUT_SCHEMA_NOT_FULFILLED,

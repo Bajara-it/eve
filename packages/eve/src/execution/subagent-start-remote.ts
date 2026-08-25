@@ -31,7 +31,6 @@ export async function startRemoteSubagent(input: {
   readonly initiatorAuth: Parameters<typeof startRemoteAgentSession>[0]["initiatorAuth"];
   readonly parentContinuationToken: string | undefined;
   readonly parentTraceContext: Parameters<typeof startRemoteAgentSession>[0]["parentTraceContext"];
-  readonly persistentSessions: boolean;
   readonly session: RuntimeSession;
   readonly taskOwned: boolean;
 }): Promise<DispatchOutcome> {
@@ -72,10 +71,16 @@ export async function startRemoteSubagent(input: {
     parentSessionId: input.session.sessionId,
     parentTurnId: input.batchEvent.turnId,
   });
+  const credentialResolver = {
+    resolverId:
+      input.dynamicRemoteAgent === undefined
+        ? action.nodeId
+        : input.dynamicRemoteAgent.credentialsStepId,
+  };
   const preparedSession = prepareAgentStart(input.currentSession, {
     identity,
     operation,
-    target: { callbackBaseUrl, kind: "agent/remote", url: resolvedRemote.url },
+    target: { callbackBaseUrl, credentialResolver, kind: "agent/remote", url: resolvedRemote.url },
   });
 
   try {
@@ -87,12 +92,12 @@ export async function startRemoteSubagent(input: {
       initiatorAuth: input.initiatorAuth,
       operationId: operation.id,
       parentTraceContext: input.parentTraceContext,
-      persistentSessions: input.persistentSessions,
       remote: resolvedRemote,
       session: input.session,
     });
     const address = {
       callbackBaseUrl,
+      credentialResolver,
       kind: "agent/remote",
       sessionId: child.sessionId,
       url: resolvedRemote.url,
