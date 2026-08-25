@@ -356,13 +356,16 @@ describe("createWorkflowRuntime#createSession", () => {
             "eve.bundle": { source: compiledArtifactsSource },
             "eve.channel": expect.objectContaining({ kind: "http", state: {} }),
             "eve.mode": "task",
+            "eve.otelTraceEnabled": false,
           }),
         },
       ],
       {
         allowReservedAttributes: true,
         attributes: {
+          "$eve.is_otel_trace_enabled": "false",
           "$eve.is_trace_content_visible": "false",
+          "$eve.title": "hello",
           "$eve.trigger": "http",
           "$eve.type": "session",
         },
@@ -371,7 +374,7 @@ describe("createWorkflowRuntime#createSession", () => {
     );
   });
 
-  it("withholds an explicit title for an unknown-audience workflow", async () => {
+  it("stores an explicit title alongside the trace-content policy", async () => {
     const compiledArtifactsSource = {} as RuntimeCompiledArtifactsSource;
     mockBundleAndRun(compiledArtifactsSource);
     startMock.mockResolvedValue({ runId: "driver-run" });
@@ -388,7 +391,8 @@ describe("createWorkflowRuntime#createSession", () => {
     const [, workflowInput, startOptions] = startMock.mock.calls[0]!;
     expect(workflowInput[0].input.message).toBe(message);
     expect(startOptions.attributes["$eve.is_trace_content_visible"]).toBe("false");
-    expect(startOptions.attributes["$eve.title"]).toBeUndefined();
+    expect(startOptions.attributes["$eve.is_otel_trace_enabled"]).toBe("false");
+    expect(startOptions.attributes["$eve.title"]).toBe("ship it");
   });
 
   it("passes the configured session timeout to the durable workflow", async () => {
@@ -471,7 +475,9 @@ describe("createWorkflowRuntime#createSession", () => {
         allowReservedAttributes: true,
         attributes: {
           "$eve.channel_request_id": "req_run",
+          "$eve.is_otel_trace_enabled": "false",
           "$eve.is_trace_content_visible": "false",
+          "$eve.title": "hello",
           "$eve.trigger": "http",
           "$eve.type": "session",
         },
@@ -511,6 +517,7 @@ describe("createWorkflowRuntime#createSession", () => {
     expect(startMock).toHaveBeenCalledWith(workflowEntryReference, expect.any(Array), {
       allowReservedAttributes: true,
       attributes: {
+        "$eve.is_otel_trace_enabled": "false",
         "$eve.parent": "parent-session",
         "$eve.parent_call": "call-1",
         "$eve.parent_turn": "turn-1",
@@ -541,7 +548,9 @@ describe("createWorkflowRuntime#createSession", () => {
     expect(startMock).toHaveBeenNthCalledWith(1, workflowEntryReference, expect.any(Array), {
       allowReservedAttributes: true,
       attributes: {
+        "$eve.is_otel_trace_enabled": "false",
         "$eve.is_trace_content_visible": "false",
+        "$eve.title": "hello",
         "$eve.trigger": "http",
         "$eve.type": "session",
       },
@@ -550,7 +559,9 @@ describe("createWorkflowRuntime#createSession", () => {
     expect(startMock).toHaveBeenNthCalledWith(2, workflowEntryReference, expect.any(Array), {
       allowReservedAttributes: true,
       attributes: {
+        "$eve.is_otel_trace_enabled": "false",
         "$eve.is_trace_content_visible": "false",
+        "$eve.title": "hello",
         "$eve.trigger": "http",
         "$eve.type": "session",
       },
@@ -584,7 +595,9 @@ describe("createWorkflowRuntime#createSession", () => {
       expect(startMock).toHaveBeenCalledWith(workflowEntryReference, expect.any(Array), {
         allowReservedAttributes: true,
         attributes: {
+          "$eve.is_otel_trace_enabled": "false",
           "$eve.is_trace_content_visible": "false",
+          "$eve.title": "hello",
           "$eve.trigger": "http",
           "$eve.type": "session",
         },
@@ -710,6 +723,8 @@ describe("createWorkflowRuntime#createSession trace seed allocation", () => {
     expect(seed).toBeDefined();
     expect(seed!.traceFlags).toBe(1);
     expect(seed!.traceId).toMatch(/^[0-9a-f]{32}$/u);
+    expect(serialized["eve.otelTraceEnabled"]).toBe(true);
+    expect(startMock.mock.calls[0]?.[2].attributes["$eve.is_otel_trace_enabled"]).toBe("true");
   });
 
   it("passes the channel adapter kind as channelType to the policy", async () => {
@@ -795,6 +810,8 @@ describe("createWorkflowRuntime#createSession trace seed allocation", () => {
       | { traceId: string; spanId: string; traceFlags: number }
       | undefined;
     expect(seed).toEqual(parentTrace);
+    expect(serialized["eve.otelTraceEnabled"]).toBe(true);
+    expect(startMock.mock.calls[0]?.[2].attributes["$eve.is_otel_trace_enabled"]).toBe("true");
   });
 
   it("does not allocate a seed when no instrumentation runtime is installed", async () => {
@@ -811,6 +828,7 @@ describe("createWorkflowRuntime#createSession trace seed allocation", () => {
     const [, workflowInput] = startMock.mock.calls[0]!;
     const serialized = workflowInput[0].serializedContext as Record<string, unknown>;
     expect(serialized["eve.sessionTraceSeed"]).toBeUndefined();
+    expect(serialized["eve.otelTraceEnabled"]).toBe(false);
   });
 
   it("does not allocate a seed when the runtime has no prepareSessionTrace", async () => {
@@ -841,5 +859,7 @@ describe("createWorkflowRuntime#createSession trace seed allocation", () => {
     const [, workflowInput] = startMock.mock.calls[0]!;
     const serialized = workflowInput[0].serializedContext as Record<string, unknown>;
     expect(serialized["eve.sessionTraceSeed"]).toBeUndefined();
+    expect(serialized["eve.otelTraceEnabled"]).toBe(false);
+    expect(startMock.mock.calls[0]?.[2].attributes["$eve.is_otel_trace_enabled"]).toBe("false");
   });
 });
