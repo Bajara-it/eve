@@ -187,6 +187,7 @@ import {
 import { getInstrumentationConfig } from "#harness/instrumentation/config.js";
 import { getInstrumentationRuntime } from "#harness/instrumentation/runtime.js";
 import type { OtelHarnessSettings } from "#tracing/otel-declaration.js";
+import { evaluateTracePolicy, isSampledTrace } from "#tracing/sampled-trace.js";
 import {
   normalizeModelMessages,
   normalizeUserContent,
@@ -338,12 +339,16 @@ const MODEL_CALL_MAX_ATTEMPTS = 3;
 const MODEL_CALL_RETRY_BASE_DELAY_MS = 500;
 
 function enrichTelemetry(
+  enabled: boolean,
   settings: OtelHarnessSettings | undefined,
   channelAudience: ChannelAudience,
   agentName: string | undefined,
   runtimeContext?: Readonly<Record<string, unknown>>,
   bridgeIntegration?: Telemetry,
 ): TelemetryOptions | undefined {
+  if (!enabled) {
+    return undefined;
+  }
   if (settings === undefined && bridgeIntegration === undefined) {
     return undefined;
   }
@@ -614,6 +619,7 @@ export function createToolLoopHarness(config: ToolLoopHarnessConfig): StepFn {
     initialSession: Readonly<Parameters<StepFn>[0]>,
     input?: StepInput,
   ): Promise<StepResult> {
+    const aiSdkTelemetryEnabled = shouldEnableAiSdkTelemetry(otelSettings, agentName);
     // --- Turn span lifecycle ------------------------------------------------
 
     // First step of a turn: open a new parent span. Continuation steps
@@ -635,7 +641,8 @@ export function createToolLoopHarness(config: ToolLoopHarnessConfig): StepFn {
     // Run the step body inside the turn span's (or restored parent's)
     // OTel context so AI SDK spans nest as children.
     const parentContext = resolveStepOtelContext(tracer, turnSpan, initialSession);
-    const executeStep = () => executeStepBody(initialSession, input, turnSpan);
+    const executeStep = () =>
+      executeStepBody(initialSession, input, turnSpan, aiSdkTelemetryEnabled);
 
     try {
       if (parentContext) {
@@ -651,6 +658,7 @@ export function createToolLoopHarness(config: ToolLoopHarnessConfig): StepFn {
     initialSession: Readonly<Parameters<StepFn>[0]>,
     input?: StepInput,
     turnSpan?: Span,
+    aiSdkTelemetryEnabled = true,
   ): Promise<StepResult> {
     let session = initialSession;
     const prepareHistory = createHistoryViewPreparer({
@@ -809,7 +817,9 @@ export function createToolLoopHarness(config: ToolLoopHarnessConfig): StepFn {
             resolveModel: config.resolveModel,
             runtimeIdentity: config.runtimeIdentity,
             session,
-            telemetry: enrichTelemetry(otelSettings, channelAudience, agentName) ?? undefined,
+            telemetry:
+              enrichTelemetry(aiSdkTelemetryEnabled, otelSettings, channelAudience, agentName) ??
+              undefined,
           });
 
           session = {
@@ -1318,7 +1328,9 @@ export function createToolLoopHarness(config: ToolLoopHarnessConfig): StepFn {
       resolveModel: config.resolveModel,
       runtimeIdentity: config.runtimeIdentity,
       session,
-      telemetry: enrichTelemetry(otelSettings, channelAudience, agentName) ?? undefined,
+      telemetry:
+        enrichTelemetry(aiSdkTelemetryEnabled, otelSettings, channelAudience, agentName) ??
+        undefined,
     });
     session = compaction.session;
     if (compaction.compacted) {
@@ -1569,7 +1581,7 @@ export function createToolLoopHarness(config: ToolLoopHarnessConfig): StepFn {
             };
       activeAttemptScope = attemptScope;
       const bridgeIntegration =
-        attemptScope === undefined || instrumentationHooks === undefined
+        !aiSdkTelemetryEnabled || attemptScope === undefined || instrumentationHooks === undefined
           ? undefined
           : createAiSdkHookBridge(
               attemptScope,
@@ -1626,6 +1638,7 @@ export function createToolLoopHarness(config: ToolLoopHarnessConfig): StepFn {
         runtimeContext: telemetryRuntimeContext,
         stopWhen: isStepCount(1),
         telemetry: enrichTelemetry(
+          aiSdkTelemetryEnabled,
           otelSettings,
           channelAudience,
           agentName,
@@ -2052,6 +2065,24 @@ export function createToolLoopHarness(config: ToolLoopHarnessConfig): StepFn {
   }
 
   return runStep;
+}
+
+function shouldEnableAiSdkTelemetry(
+  settings: OtelHarnessSettings | undefined,
+  agentName: string | undefined,
+): boolean {
+  if (settings === undefined) return true;
+
+  const store = contextStorage.getStore();
+  const traceSeed = store?.get(SessionTraceSeedKey);
+  if (traceSeed !== undefined) return isSampledTrace(traceSeed);
+
+  const channel = store?.get(ChannelInstrumentationKey);
+  return evaluateTracePolicy(settings.tracePolicy, {
+    agentName,
+    audience: normalizeChannelAudience(channel?.metadata.audience),
+    channelType: channel?.channelType,
+  });
 }
 
 function isValidSpanContext(spanContext: SpanContext): boolean {
