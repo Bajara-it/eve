@@ -708,6 +708,17 @@ export const INTEGRATIONS: readonly IntegrationEntry[] = [
     },
   },
   {
+    slug: "shopify",
+    name: "Shopify",
+    kind: "connection",
+    tagline: "Search products and manage carts and checkouts on a Shopify storefront.",
+    surfaces: { scaffoldable: false, registry: true, gallery: true },
+    connection: {
+      description: "Search products and build carts and checkouts on a Shopify storefront.",
+      mcp: { url: "https://{shop}.myshopify.com/api/ucp/mcp" },
+    },
+  },
+  {
     slug: "stripe",
     name: "Stripe",
     kind: "connection",

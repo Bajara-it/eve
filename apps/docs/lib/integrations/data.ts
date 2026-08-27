@@ -84,8 +84,8 @@ export interface Integration {
   /** Searchable keywords beyond the name. */
   keywords?: string[];
   /**
-   * Channels and extensions author their setup as markdown. Connections leave
-   * these unset and supply a `connection` spec, from which content is generated.
+   * Channels and extensions author their setup as markdown. Connections normally
+   * generate it from `connection`, but may override Quick start and Configure.
    */
   install?: string;
   quickStart?: string;
@@ -120,6 +120,8 @@ interface ExtensionPresentation extends Presentation {
 /** Connection overlay: presentation plus Connect auth/config details. */
 interface ConnectionPresentation extends Presentation {
   authModes: AuthMode[];
+  quickStart?: string;
+  configure?: string;
   apiKey?: ApiKeySpec;
   connector?: string;
   connectors?: Partial<Record<AuthMode, string>>;
@@ -1870,6 +1872,57 @@ const connectionPresentations: Record<string, ConnectionPresentation> = {
     keywords: ["mcp", "traffic", "market data", "competitive intelligence", "oauth", "connect"],
     authModes: ["user"],
   },
+  shopify: {
+    logo: "shopify",
+    docsHref: "https://shopify.dev/docs/apps/build/storefront-mcp",
+    keywords: ["mcp", "ucp", "commerce", "products", "carts", "checkouts"],
+    authModes: [],
+    quickStart: `Create \`agent/connections/shopify.ts\`:
+
+\`\`\`ts
+import { defineMcpClientConnection } from "eve/connections";
+
+const SHOPIFY_EXAMPLE_PROFILE =
+  "https://shopify.dev/ucp/agent-profiles/examples/2026-04-08/valid-with-capabilities.json";
+
+// Shopify cannot reach localhost. Use its public profile, or expose this route with a tool like ngrok.
+function agentProfileUrl(): string {
+  if (process.env.EVE_DEV === "1") return SHOPIFY_EXAMPLE_PROFILE;
+
+  return \`https://\${process.env.VERCEL_PROJECT_PRODUCTION_URL}/.well-known/ucp\`;
+}
+
+export default defineMcpClientConnection({
+  url: \`https://\${process.env.SHOPIFY_STORE_DOMAIN!}/api/ucp/mcp\`,
+  description: "Search products and build carts and checkouts on a Shopify storefront.",
+  toolCall: {
+    providedArguments: {
+      meta: ({ callId, session, toolName }) => ({
+        "ucp-agent": {
+          profile: agentProfileUrl(),
+        },
+
+        // Include callId so sibling calls are unique while durable replays reuse the same key.
+        ...(["cancel_cart", "complete_checkout", "cancel_checkout"].includes(toolName)
+          ? {
+              "idempotency-key": \`\${session.id}:\${session.turn.id}:\${toolName}:\${callId}\`,
+            }
+          : {}),
+      }),
+    },
+  },
+});
+\`\`\``,
+    configure: `Set your Shopify storefront domain:
+
+\`\`\`bash
+SHOPIFY_STORE_DOMAIN=your-store.myshopify.com
+\`\`\`
+
+During local development, the connection uses Shopify's public example because Shopify cannot reach localhost. To test your profile locally, expose \`/.well-known/ucp\` with [ngrok](https://ngrok.com/). In production, the connection uses the anonymous profile at \`/.well-known/ucp\`.
+
+See Shopify's [agent profile documentation](https://shopify.dev/docs/agents/profiles) for profile requirements.`,
+  },
   stripe: {
     logo: "stripe",
     docsHref: "/docs/connections/mcp",
@@ -2289,6 +2342,8 @@ function buildConnection(entry: IntegrationEntry): Integration {
     logo: presentation.logo,
     docsHref: presentation.docsHref,
     keywords: presentation.keywords,
+    quickStart: presentation.quickStart,
+    configure: presentation.configure,
     connection: spec,
   };
 }
