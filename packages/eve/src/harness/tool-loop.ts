@@ -202,12 +202,10 @@ import {
 } from "#harness/messages.js";
 import { normalizeProviderToolHistory } from "#harness/provider-tool-history.js";
 import {
-  type AuthorizationSignal,
   getSupersededAuthorizationChallenges,
-  isAuthorizationSignal,
   setPendingAuthorization,
 } from "#harness/authorization.js";
-import { readToolInterrupt } from "#harness/tool-interrupts.js";
+import { resolveInlineAuthorizationInterrupt } from "#harness/inline-tool-authorization.js";
 import {
   createAuthorizationCompletedEvent,
   createAuthorizationRequiredEvent,
@@ -2707,8 +2705,17 @@ async function handleStepResult(input: {
   });
   const inputRequests: InputRequest[] = [...approvalRequests, ...questionRequests];
   const pendingApprovals = renderPendingApprovalsSnippet(approvalRequests);
+  // Keep outcomes from resumed work ahead of the synthetic pending-approval
+  // message; only the unresolved assistant response belongs to the parked batch.
+  const pendingResponseStart = responseMessages.findIndex((message) => message.role !== "tool");
+  const committedResponseMessages =
+    pendingResponseStart === -1
+      ? responseMessages
+      : responseMessages.slice(0, pendingResponseStart);
+  const pendingResponseMessages = responseMessages.slice(committedResponseMessages.length);
   const parkedInputHistory: ModelMessage[] = [
     ...promptMessages,
+    ...committedResponseMessages,
     ...(pendingApprovals === undefined
       ? []
       : [{ content: pendingApprovals, role: "user" as const }]),
@@ -2774,7 +2781,7 @@ async function handleStepResult(input: {
         stepIndex: emissionState.stepIndex,
         turnId: emissionState.turnId,
       },
-      responseMessages,
+      responseMessages: pendingResponseMessages,
       session: { ...baseSession, history: parkedInputHistory },
     });
 
@@ -2831,7 +2838,7 @@ async function handleStepResult(input: {
           );
         })
         .map((request) => request.requestId),
-      responseMessages,
+      responseMessages: pendingResponseMessages,
       session: { ...baseSession, history: parkedInputHistory },
     });
 
@@ -2859,9 +2866,12 @@ async function handleStepResult(input: {
 
   // --- Park on authorization request ------------------------------------------
 
-  const authSignal = findAuthorizationSignalFromToolResults(result.toolResults);
-  if (authSignal) {
-    const { challenges } = authSignal;
+  const authorizationInterrupt = resolveInlineAuthorizationInterrupt({
+    messages: [...promptMessages, ...responseMessages],
+    toolResults: result.toolResults,
+  });
+  if (authorizationInterrupt) {
+    const { challenges, history: authorizationHistory } = authorizationInterrupt;
 
     if (emit) {
       for (const superseded of getSupersededAuthorizationChallenges(
@@ -2910,7 +2920,7 @@ async function handleStepResult(input: {
       session: setHarnessEmissionState(
         {
           ...baseSession,
-          history: [...promptMessages],
+          history: authorizationHistory,
           state: setPendingAuthorization(baseSession.state, { challenges }),
         },
         emissionState,
@@ -3493,26 +3503,4 @@ async function runModelCallWithRetries<T>(
       await new Promise((resolve) => setTimeout(resolve, delayMs));
     }
   }
-}
-
-function findAuthorizationSignalFromToolResults(
-  toolResults: readonly TypedToolResult<ToolSet>[] | undefined,
-): AuthorizationSignal | undefined {
-  const ctx = contextStorage.getStore();
-  if (ctx !== undefined) {
-    for (const toolResult of toolResults ?? []) {
-      const stashed = readToolInterrupt(ctx, toolResult.toolCallId);
-      if (stashed !== undefined && isAuthorizationSignal(stashed)) {
-        return stashed;
-      }
-    }
-  }
-
-  for (const toolResult of toolResults ?? []) {
-    if (isAuthorizationSignal(toolResult.output)) {
-      return toolResult.output;
-    }
-  }
-
-  return undefined;
 }
