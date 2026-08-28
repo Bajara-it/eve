@@ -154,11 +154,6 @@ import {
   shouldPrepareApprovalPolicyTools,
 } from "#harness/approval-delivery-coordinator.js";
 import { buildTelemetryRuntimeContext } from "#harness/instrumentation/runtime-context.js";
-import {
-  instrumentationHooksForDecision,
-  instrumentationHooksForAudience,
-  shouldCaptureInstrumentationContent,
-} from "#harness/instrumentation/content-policy.js";
 import { createAiSdkHookBridge } from "#harness/ai-sdk-hook-bridge.js";
 import {
   createInstrumentationHandleEvent,
@@ -189,8 +184,12 @@ import {
 import { getInstrumentationConfig } from "#harness/instrumentation/config.js";
 import { getInstrumentationRuntime } from "#harness/instrumentation/runtime.js";
 import type { InstrumentationDecision } from "#shared/instrumentation-decision.js";
-import { applyAudienceCeiling } from "#shared/instrumentation-content.js";
+import {
+  applyAudienceCeiling,
+  shouldCaptureInstrumentationContent,
+} from "#shared/instrumentation-content.js";
 import type { OtelHarnessSettings } from "#tracing/otel-declaration.js";
+import { readCurrentSessionTraceDecision } from "#tracing/agent-trace-context-store.js";
 import {
   isSampledTrace,
   resolveTracePolicy,
@@ -346,9 +345,7 @@ function enrichTelemetry(
   runtimeContext?: Readonly<Record<string, unknown>>,
   bridgeIntegration?: Telemetry,
 ): TelemetryOptions | undefined {
-  if (decision?.action === "drop") {
-    return undefined;
-  }
+  const dropsTrace = decision?.action === "drop";
   if (settings === undefined && bridgeIntegration === undefined) {
     return undefined;
   }
@@ -362,6 +359,21 @@ function enrichTelemetry(
 
   const effectiveDecision =
     decision === undefined ? undefined : applyAudienceCeiling(decision, channelAudience);
+  const recordInputs =
+    !dropsTrace &&
+    (effectiveDecision?.action === "record"
+      ? effectiveDecision.recordInputs
+      : shouldCaptureInstrumentationContent(channelAudience)) &&
+    (settings?.recordInputs ?? false);
+  const recordOutputs =
+    !dropsTrace &&
+    (effectiveDecision?.action === "record"
+      ? effectiveDecision.recordOutputs
+      : shouldCaptureInstrumentationContent(channelAudience)) &&
+    (settings?.recordOutputs ?? false);
+  const sanitizeEveOtelErrors = settings !== undefined && !(recordInputs && recordOutputs);
+  const registeredIntegrations = () =>
+    getRegisteredTelemetryIntegrations({ sanitizeEveOtelErrors });
   return {
     functionId: settings?.functionId ?? agentName,
     includeRuntimeContext,
@@ -369,19 +381,13 @@ function enrichTelemetry(
     // bridge has to be composed with them rather than handed over on its own.
     integrations:
       bridgeIntegration === undefined
-        ? undefined
-        : [bridgeIntegration, ...getRegisteredTelemetryIntegrations()],
+        ? sanitizeEveOtelErrors
+          ? [...registeredIntegrations()]
+          : undefined
+        : [bridgeIntegration, ...registeredIntegrations()],
     isEnabled: true,
-    recordInputs:
-      (effectiveDecision?.action === "record"
-        ? effectiveDecision.recordInputs
-        : shouldCaptureInstrumentationContent(channelAudience)) &&
-      (settings?.recordInputs ?? false),
-    recordOutputs:
-      (effectiveDecision?.action === "record"
-        ? effectiveDecision.recordOutputs
-        : shouldCaptureInstrumentationContent(channelAudience)) &&
-      (settings?.recordOutputs ?? false),
+    recordInputs,
+    recordOutputs,
   };
 }
 
@@ -627,7 +633,11 @@ export function createToolLoopHarness(config: ToolLoopHarnessConfig): StepFn {
     initialSession: Readonly<Parameters<StepFn>[0]>,
     input?: StepInput,
   ): Promise<StepResult> {
-    const instrumentationDecision = resolveStepInstrumentationDecision(otelSettings, agentName);
+    const instrumentationDecision = resolveStepInstrumentationDecision(
+      otelSettings,
+      agentName,
+      initialSession.sessionId,
+    );
     // --- Turn span lifecycle ------------------------------------------------
 
     // First step of a turn: open a new parent span. Continuation steps
@@ -689,14 +699,7 @@ export function createToolLoopHarness(config: ToolLoopHarnessConfig): StepFn {
     const store = contextStorage.getStore();
     const channelInstrumentation = store?.get(ChannelInstrumentationKey);
     const channelAudience = normalizeChannelAudience(channelInstrumentation?.metadata.audience);
-    const instrumentationHooks =
-      instrumentationDecision === undefined
-        ? instrumentationHooksForAudience(config.instrumentation?.hooks, channelAudience)
-        : instrumentationHooksForDecision(
-            config.instrumentation?.hooks,
-            instrumentationDecision,
-            channelAudience,
-          );
+    const instrumentationHooks = config.instrumentation?.hooks;
     const parent = store?.get(ParentSessionKey);
     const channel = store?.get(ChannelKey);
     const callback = store?.get(SessionCallbackKey);
@@ -1570,9 +1573,7 @@ export function createToolLoopHarness(config: ToolLoopHarnessConfig): StepFn {
             };
       activeAttemptScope = attemptScope;
       const bridgeIntegration =
-        instrumentationDecision?.action === "drop" ||
-        attemptScope === undefined ||
-        instrumentationHooks === undefined
+        attemptScope === undefined || instrumentationHooks === undefined
           ? undefined
           : createAiSdkHookBridge(
               attemptScope,
@@ -2061,18 +2062,23 @@ export function createToolLoopHarness(config: ToolLoopHarnessConfig): StepFn {
 function resolveStepInstrumentationDecision(
   settings: OtelHarnessSettings | undefined,
   agentName: string | undefined,
+  sessionId: string,
 ): InstrumentationDecision | undefined {
   if (settings === undefined) return undefined;
 
   const store = contextStorage.getStore();
   const traceSeed = store?.get(SessionTraceSeedKey);
   if (traceSeed?.decision !== undefined) return traceSeed.decision;
+  const persisted = readCurrentSessionTraceDecision(sessionId);
+  if (persisted !== undefined) return persisted;
 
   const channel = store?.get(ChannelInstrumentationKey);
   const audience = normalizeChannelAudience(channel?.metadata.audience);
   if (traceSeed !== undefined) {
     return resolveTracePolicyDecision(isSampledTrace(traceSeed), audience);
   }
+  // The first step can reach this before OTel session preparation persists its
+  // decision, so that preparation may invoke the policy again.
   return resolveTracePolicy(settings.tracePolicy, {
     agentName,
     audience,
