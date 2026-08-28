@@ -1,7 +1,7 @@
 /**
  * Slack interactivity wire handling. It decodes and authorizes framework HITL
  * responses, opens freeform modals inline before Slack's trigger expires, and
- * forwards user-owned actions and shortcuts to their authored hooks.
+ * forwards user-owned actions, shortcuts, and slash commands to their authored hooks.
  */
 
 import {
@@ -50,6 +50,7 @@ import type {
 } from "#public/channels/slack/slackChannel.js";
 import type { ChannelFrom, ChannelResolveSession } from "#channel/channel-operations.js";
 import { bindSlackSessionOperations } from "#public/channels/slack/session-operations.js";
+import { dispatchSlashCommand } from "#public/channels/slack/slash-command.js";
 import { parseInputResponse } from "#shared/input.js";
 
 const log = createLogger("slack.interactions");
@@ -241,8 +242,8 @@ export interface InteractionHandlerDeps {
  * `view_submission` payloads to the freeform-answer flow, intercepts
  * "Type your answer" button clicks to open a modal, resolves
  * framework HITL clicks through `onInputResponse` to the parked session,
- * forwards other block actions to `config.onInteraction`, and forwards Slack
- * shortcuts to `config.onShortcut`.
+ * forwards other block actions to `config.onInteraction`, shortcuts to
+ * `config.onShortcut`, and slash commands to `config.onSlashCommand`.
  */
 export async function handleInteractionPost(
   rawBody: string,
@@ -267,6 +268,11 @@ export async function handleInteractionPost(
 
   if (payload.kind === "view_submission") {
     return handleViewSubmission(payload, ctx, deps);
+  }
+
+  if (payload.kind === "slash_command") {
+    dispatchSlashCommand(payload, ctx, deps.config);
+    return new Response(null, { status: 200 });
   }
 
   if (payload.kind === "unsupported") {
