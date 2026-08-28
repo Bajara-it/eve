@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ChannelAdapter } from "#channel/adapter.js";
 import { attachChannelActivityPresentation } from "#channel/activity-renderer.js";
-import { ChannelRequestIdKey, ActivityKey } from "#context/keys.js";
+import { ChannelRequestIdKey, ActivityObserverKey } from "#context/keys.js";
 import { resolveInstalledPackageInfo } from "#internal/application/package.js";
 import {
   createWorkflowRuntime,
@@ -454,7 +454,7 @@ describe("createWorkflowRuntime#createSession", () => {
     });
     expect(collectorInput.token).toHaveLength(43);
     const workflowInput = startMock.mock.calls[1]?.[1][0];
-    expect(workflowInput.serializedContext[ActivityKey.name]).toEqual({
+    expect(workflowInput.serializedContext[ActivityObserverKey.name]).toEqual({
       sink: {
         url: `https://agent.example.com/eve/v1/activity/${collectorInput.token}`,
         version: 1,
@@ -504,7 +504,7 @@ describe("createWorkflowRuntime#createSession", () => {
     });
 
     const workflowInput = startMock.mock.calls[1]?.[1][0];
-    expect(workflowInput.serializedContext[ActivityKey.name]).toBeUndefined();
+    expect(workflowInput.serializedContext[ActivityObserverKey.name]).toBeUndefined();
   });
 
   it("cancels the collector when root workflow startup fails", async () => {

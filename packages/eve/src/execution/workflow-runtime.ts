@@ -21,8 +21,8 @@ import type {
   SessionCommandResult,
   SessionTraceContext,
 } from "#channel/types.js";
+import { ActivityObserverKey } from "#context/keys.js";
 import { serializeContext } from "#context/serialize.js";
-import { ActivityKey } from "#context/keys.js";
 import {
   ChannelInstrumentationKey,
   OtelTraceEnabledKey,
@@ -185,9 +185,10 @@ export function createWorkflowRuntime(config: {
       ctx.set(OtelTraceEnabledKey, getInstrumentationRuntime()?.prepareSessionTrace !== undefined);
       const sessionTimeoutMs = effectiveAgent.limits?.sessionTimeoutMs;
       let collectorRunId: string | undefined;
+      let activityObserver = input.activityObserver;
       if (
         input.parent === undefined &&
-        input.activity === undefined &&
+        activityObserver === undefined &&
         (getChannelActivityPresentation(input.adapter)?.renderers.length ?? 0) > 0
       ) {
         const collectorContext = serializeContext(ctx);
@@ -211,12 +212,13 @@ export function createWorkflowRuntime(config: {
             ? `https://${process.env.VERCEL_URL}`
             : "http://localhost:3000";
           const baseUrl = resolveWorkflowCallbackBaseUrl(fallbackOrigin);
-          ctx.set(ActivityKey, {
+          activityObserver = {
             sink: {
               url: createWorkflowCallbackUrl(baseUrl, createEveActivityRoutePath(token)),
               version: 1,
             },
-          });
+          };
+          ctx.set(ActivityObserverKey, activityObserver);
         } catch {
           await cancelActivityCollector(collectorRunId);
           collectorRunId = undefined;

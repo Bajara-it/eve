@@ -194,6 +194,7 @@ export function eveChannel(input: EveChannelInput): EveChannel {
         let handle: Awaited<ReturnType<typeof createSession>>;
         try {
           handle = await createSession({
+            activityObserver: body.activityObserver,
             auth: messageResult.auth,
             capabilities:
               body.capabilities ?? (body.mode === "task" ? undefined : { requestInput: true }),
@@ -282,6 +283,7 @@ export function eveChannel(input: EveChannelInput): EveChannel {
         try {
           const session = attachSession(sessionId);
           const options = {
+            activityObserver: body.activityObserver,
             auth: dispatchAuth,
             callback: body.callback,
             context,
