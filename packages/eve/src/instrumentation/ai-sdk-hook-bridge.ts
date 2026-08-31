@@ -24,8 +24,8 @@ import { structuralProviderMetadata } from "#instrumentation/content.js";
 type TelemetryEvent<TKey extends keyof Telemetry> = Parameters<NonNullable<Telemetry[TKey]>>[0];
 
 interface AttemptState {
-  /** False when no provider asked for content, so none is projected at all. */
-  readonly capturesContent: boolean;
+  readonly capturesInputs: boolean;
+  readonly capturesOutputs: boolean;
   readonly modelKeys: Map<string, string>;
   readonly runtimeContext?: Readonly<Record<string, unknown>>;
   readonly scope: InstrumentationAttemptScope;
@@ -43,7 +43,8 @@ export function createAiSdkHookBridge(
   runtimeContext?: Readonly<Record<string, unknown>>,
 ): Telemetry {
   const state: AttemptState = {
-    capturesContent: hooks.capturesContent,
+    capturesInputs: hooks.capturesInputs ?? hooks.capturesContent,
+    capturesOutputs: hooks.capturesOutputs ?? hooks.capturesContent,
     modelKeys: new Map(),
     runtimeContext:
       runtimeContext !== undefined && Object.keys(runtimeContext).length > 0
@@ -90,7 +91,7 @@ export function createAiSdkHookBridge(
       // that the per-call telemetry events don't. Publish it for providers
       // that know what to do with it; skip when there is none.
       if (event.providerMetadata === undefined) return;
-      const providerMetadata = state.capturesContent
+      const providerMetadata = state.capturesOutputs
         ? event.providerMetadata
         : structuralProviderMetadata(event.providerMetadata);
       await hooks.publish(
@@ -174,7 +175,7 @@ function toModelCallStarted(
 ): InstrumentationModelCallStartedEvent {
   return Object.freeze({
     idempotencyKey,
-    input: state.capturesContent
+    input: state.capturesInputs
       ? Object.freeze({
           instructions: source.instructions,
           messages: Object.freeze([...source.messages]),
@@ -193,7 +194,7 @@ function toModelCallCompleted(
   source: TelemetryEvent<"onLanguageModelCallEnd">,
 ): InstrumentationModelCallCompletedEvent {
   return Object.freeze({
-    content: state.capturesContent ? toContentParts(source.content) : undefined,
+    content: state.capturesOutputs ? toContentParts(source.content) : undefined,
     finishReason: source.finishReason,
     idempotencyKey,
     scope: state.scope,
@@ -271,7 +272,7 @@ function toToolCallStarted(
   return Object.freeze({
     callId: source.toolCall.toolCallId,
     idempotencyKey,
-    input: state.capturesContent ? source.toolCall.input : undefined,
+    input: state.capturesInputs ? source.toolCall.input : undefined,
     scope: state.scope,
     toolName: source.toolCall.toolName,
     type: "tool.call.started",
@@ -285,7 +286,7 @@ function toToolCallCompleted(
 ): InstrumentationToolCallCompletedEvent {
   return Object.freeze({
     idempotencyKey,
-    output: toToolOutput(source.toolOutput, state.capturesContent),
+    output: toToolOutput(source.toolOutput, state.capturesOutputs),
     scope: state.scope,
     type: "tool.call.completed",
   });

@@ -12,6 +12,7 @@ import {
   toolCallIdempotencyKey,
   turnIdempotencyKey,
   type InstrumentationAttemptScope,
+  type InstrumentationEvent,
   type InstrumentationModelCallStartedEvent,
   type InstrumentationProviderDefinition,
   type InstrumentationToolCallCompletedEvent,
@@ -22,9 +23,9 @@ import {
   rememberInstrumentationActionScope,
 } from "#instrumentation/state.js";
 
-const { logWarn } = vi.hoisted(() => ({ logWarn: vi.fn() }));
+const { logDebug, logWarn } = vi.hoisted(() => ({ logDebug: vi.fn(), logWarn: vi.fn() }));
 vi.mock("#internal/logging.js", () => ({
-  createLogger: () => ({ warn: logWarn }),
+  createLogger: () => ({ debug: logDebug, warn: logWarn }),
   formatError: (error: unknown) => error,
 }));
 
@@ -821,22 +822,274 @@ describe("provider dispatch groups", () => {
   });
 });
 
-describe("capture", () => {
-  it("reports content capture only when some provider asked for it", () => {
-    expect(createInstrumentationHooks([{ name: "quiet" }]).capturesContent).toBe(false);
+describe("trace policies", () => {
+  it("defaults provider content to the audience-aware policy", () => {
+    const hooks = createInstrumentationHooks([{ name: "provider" }]);
+
+    expect(hooks.forTrace?.({ audience: "public" }).capturesContent).toBe(true);
+    expect(hooks.forTrace?.({ audience: "private" }).capturesContent).toBe(false);
+  });
+
+  it("passes trace context to each provider policy", () => {
+    const tracePolicy = vi.fn(() => ({
+      emit: true as const,
+      recordInputs: true,
+      recordOutputs: false,
+    }));
+    const hooks = createInstrumentationHooks([{ name: "provider", tracePolicy }]);
+    const trace = {
+      agentName: "weather",
+      audience: "private" as const,
+      channelType: "slack",
+    };
+
+    tracePolicy.mockClear();
+    expect(hooks.forTrace?.(trace).capturesContent).toBe(true);
+    expect(tracePolicy).toHaveBeenCalledExactlyOnceWith(trace);
+  });
+
+  it("evaluates unbound policies once with an unknown trace", async () => {
+    const tracePolicy = vi.fn(() => true);
+    const hooks = createInstrumentationHooks([{ name: "provider", tracePolicy }]);
+
+    await hooks.publish({
+      idempotencyKey: turnIdempotencyKey("session-1", "turn-1"),
+      rootSessionId: "session-1",
+      sequence: 0,
+      sessionId: "session-1",
+      turnId: "turn-1",
+      type: "turn.started",
+    });
+    await hooks.publish({
+      idempotencyKey: turnIdempotencyKey("session-1", "turn-1"),
+      sessionId: "session-1",
+      turnId: "turn-1",
+      type: "turn.completed",
+    });
+
+    expect(tracePolicy).toHaveBeenCalledExactlyOnceWith({
+      agentName: undefined,
+      audience: "unknown",
+      channelType: undefined,
+    });
+  });
+
+  it("lets an explicit provider policy authorize private content", async () => {
+    const observed = vi.fn();
+    const hooks = createInstrumentationHooks([
+      {
+        events: { "action.started": observed },
+        name: "private-audit",
+        tracePolicy: () => ({ emit: true, recordInputs: true, recordOutputs: false }),
+      },
+    ]).forTrace!({ audience: "private" });
+
+    await hooks.publish({
+      callId: "call-1",
+      idempotencyKey: actionIdempotencyKey(scope.sessionId, scope.turnId, "call-1"),
+      input: { secret: "private" },
+      kind: "tool-call",
+      name: "weather",
+      scope,
+      type: "action.started",
+    });
+
+    expect(observed.mock.calls[0]?.[0].input).toEqual({ secret: "private" });
+  });
+
+  it("projects input and output content independently per provider", async () => {
+    const inputEvents: InstrumentationEvent[] = [];
+    const outputEvents: InstrumentationEvent[] = [];
+    const events = (target: InstrumentationEvent[]) => ({
+      "model.call.completed": (event: InstrumentationEvent) => void target.push(event),
+      "model.call.started": (event: InstrumentationEvent) => void target.push(event),
+    });
+    const hooks = createInstrumentationHooks([
+      {
+        events: events(inputEvents),
+        name: "inputs",
+        tracePolicy: () => ({ emit: true, recordInputs: true, recordOutputs: false }),
+      },
+      {
+        events: events(outputEvents),
+        name: "outputs",
+        tracePolicy: () => ({ emit: true, recordInputs: false, recordOutputs: true }),
+      },
+    ]).forTrace!({ audience: "public" });
+
+    await hooks.publish({
+      idempotencyKey: "model-1",
+      input: { instructions: "private prompt", messages: [] },
+      model: { modelId: "test", provider: "test" },
+      scope,
+      type: "model.call.started",
+    });
+    await hooks.publish({
+      content: [{ text: "private answer", type: "text" }],
+      finishReason: "stop",
+      idempotencyKey: "model-1",
+      scope,
+      type: "model.call.completed",
+      usage: {},
+    });
+
+    expect(inputEvents).toMatchObject([
+      { input: { instructions: "private prompt" } },
+      { content: undefined },
+    ]);
+    expect(outputEvents).toMatchObject([
+      { input: undefined },
+      { content: [{ text: "private answer", type: "text" }] },
+    ]);
+  });
+
+  it("does not snapshot denied error content", async () => {
+    const observed = vi.fn();
+    const error = Object.defineProperty({}, "secret", {
+      enumerable: true,
+      get: () => {
+        throw new Error("error content was read");
+      },
+    });
+    const hooks = createInstrumentationHooks([
+      {
+        events: { "turn.failed": observed },
+        name: "inputs-only",
+        tracePolicy: () => ({ emit: true, recordInputs: true, recordOutputs: false }),
+      },
+    ]).forTrace!({ audience: "public" });
+
+    await hooks.publish({
+      error,
+      idempotencyKey: turnIdempotencyKey("session-1", "turn-1"),
+      sessionId: "session-1",
+      turnId: "turn-1",
+      type: "turn.failed",
+    });
+
+    expect(observed.mock.calls[0]?.[0].error).toBeUndefined();
+  });
+
+  it("reports content capture only when an admitted provider requests it", () => {
     expect(
-      createInstrumentationHooks([{ capture: "metadata", name: "quiet" }, { name: "also-quiet" }])
+      createInstrumentationHooks([
+        {
+          name: "unbound",
+          tracePolicy: () => ({ emit: true, recordInputs: true, recordOutputs: true }),
+        },
+      ]).capturesContent,
+    ).toBe(false);
+    expect(
+      createInstrumentationHooks([{ capture: "content", name: "legacy" }]).capturesContent,
+    ).toBe(true);
+    expect(
+      createInstrumentationHooks([
+        {
+          capture: "content",
+          name: "explicit-policy",
+          tracePolicy: () => ({ emit: true, recordInputs: false, recordOutputs: false }),
+        },
+      ]).capturesContent,
+    ).toBe(false);
+    expect(
+      createInstrumentationHooks([{ name: "quiet" }]).forTrace!({ audience: "private" })
         .capturesContent,
     ).toBe(false);
     expect(
-      createInstrumentationHooks([{ name: "quiet" }, { capture: "content", name: "loud" }])
-        .capturesContent,
+      createInstrumentationHooks([
+        {
+          name: "quiet",
+          tracePolicy: () => ({ emit: true, recordInputs: false, recordOutputs: false }),
+        },
+        {
+          name: "also-quiet",
+          tracePolicy: () => ({ emit: true, recordInputs: false, recordOutputs: false }),
+        },
+      ]).forTrace!({ audience: "public" }).capturesContent,
+    ).toBe(false);
+    expect(
+      createInstrumentationHooks([
+        { name: "quiet" },
+        {
+          name: "loud",
+          tracePolicy: () => ({ emit: true, recordInputs: true, recordOutputs: true }),
+        },
+      ]).forTrace!({ audience: "public" }).capturesContent,
     ).toBe(true);
     expect(
       createInstrumentationHooks({
-        parallel: [{ capture: "content", name: "loud" }],
-      }).capturesContent,
+        parallel: [
+          {
+            name: "loud",
+            tracePolicy: () => ({ emit: true, recordInputs: true, recordOutputs: true }),
+          },
+        ],
+      }).forTrace!({ audience: "public" }).capturesContent,
     ).toBe(true);
+  });
+
+  it("does not invoke a provider whose policy drops the trace", async () => {
+    const observed = vi.fn();
+    const hooks = createInstrumentationHooks([
+      {
+        events: { "turn.started": observed },
+        name: "dropped",
+        tracePolicy: () => false,
+      },
+    ]).forTrace!({ audience: "public" });
+
+    await hooks.publish({
+      idempotencyKey: turnIdempotencyKey("session-1", "turn-1"),
+      rootSessionId: "session-1",
+      sequence: 0,
+      sessionId: "session-1",
+      turnId: "turn-1",
+      type: "turn.started",
+    });
+
+    expect(observed).not.toHaveBeenCalled();
+  });
+
+  it("isolates a throwing policy to its provider", async () => {
+    const rejected = vi.fn();
+    const observed = vi.fn();
+    const unboundHooks = createInstrumentationHooks([
+      {
+        events: { "turn.started": rejected },
+        name: "rejected",
+        tracePolicy: () => {
+          throw new Error("policy failed");
+        },
+      },
+      {
+        events: { "turn.started": observed },
+        name: "observed",
+        tracePolicy: () => ({ emit: true, recordInputs: false, recordOutputs: false }),
+      },
+    ]);
+    const hooks = unboundHooks.forTrace!({ audience: "public" });
+    unboundHooks.forTrace!({ audience: "private" });
+
+    await hooks.publish({
+      idempotencyKey: turnIdempotencyKey("session-1", "turn-1"),
+      rootSessionId: "session-1",
+      sequence: 0,
+      sessionId: "session-1",
+      turnId: "turn-1",
+      type: "turn.started",
+    });
+
+    expect(rejected).not.toHaveBeenCalled();
+    expect(observed).toHaveBeenCalledOnce();
+    expect(logWarn).toHaveBeenCalledWith(
+      "instrumentation provider trace policy failed",
+      expect.objectContaining({ provider: "rejected" }),
+    );
+    expect(
+      logWarn.mock.calls.filter(
+        ([message]) => message === "instrumentation provider trace policy failed",
+      ),
+    ).toHaveLength(1);
   });
 
   it("allows only structural provider metadata by default", async () => {
@@ -845,7 +1098,7 @@ describe("capture", () => {
     const hooks = createInstrumentationHooks([
       { events: { "step.attempt.metadata": metadataOnly }, name: "metadata" },
       {
-        capture: "content",
+        tracePolicy: () => ({ emit: true, recordInputs: true, recordOutputs: true }),
         events: { "step.attempt.metadata": wantsContent },
         name: "content",
       },
@@ -883,7 +1136,11 @@ describe("capture", () => {
     const wantsContent = vi.fn();
     const hooks = createInstrumentationHooks([
       { events: { "action.failed": metadataOnly }, name: "metadata" },
-      { capture: "content", events: { "action.failed": wantsContent }, name: "content" },
+      {
+        events: { "action.failed": wantsContent },
+        name: "content",
+        tracePolicy: () => ({ emit: true, recordInputs: true, recordOutputs: true }),
+      },
     ]);
     const error = { output: "private tool output", requestBody: "private request" };
     const actionScope = { ...scope };
@@ -944,7 +1201,7 @@ describe("capture", () => {
         name: "metadata",
       },
       {
-        capture: "content",
+        tracePolicy: () => ({ emit: true, recordInputs: true, recordOutputs: true }),
         events: {
           "input.requested": (event) => void contentEvents.push(event),
           "input.resolved": (event) => void contentEvents.push(event),
@@ -998,7 +1255,7 @@ describe("capture", () => {
         { events: { "tool.call.completed": mutator }, name: "first" },
         { events: { "tool.call.completed": observed }, name: "second" },
         {
-          capture: "content",
+          tracePolicy: () => ({ emit: true, recordInputs: true, recordOutputs: true }),
           events: { "tool.call.completed": content },
           name: "content",
         },

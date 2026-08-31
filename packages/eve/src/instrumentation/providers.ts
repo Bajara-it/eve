@@ -154,5 +154,6 @@ function toProviderDefinition(
     name: entry.slot,
     shutdown: entry.provider.shutdown,
     stateNamespace: `authored:${entry.slot}`,
+    tracePolicy: entry.provider.tracePolicy,
   };
 }

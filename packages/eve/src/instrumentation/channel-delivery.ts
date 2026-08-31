@@ -20,6 +20,7 @@ export interface ChannelDeliveryStartInstrumentation {
   readonly ctx: AlsContext;
   readonly delivery: DeliverHookPayload;
   readonly hooks: InstrumentationHooks | undefined;
+  readonly policyAgentName?: string;
   readonly rootSessionId: string;
   readonly sequence: number;
   readonly sessionId: string;
@@ -44,7 +45,13 @@ export async function instrumentChannelDelivery(
     const type =
       `channel.delivery.${input.outcome}` as InstrumentationChannelDeliveryTerminalEvent["type"];
     for (const item of active) {
-      await input.hooks.publish({
+      const hooks =
+        input.hooks.forTrace?.({
+          agentName: item.policyAgentName,
+          audience: normalizeChannelAudience(item.delivery.channelAudience),
+          channelType: item.channelType,
+        }) ?? input.hooks;
+      await hooks.publish({
         agentName: item.agentName,
         delivery: item.delivery,
         error: input.error,
@@ -65,10 +72,14 @@ export async function instrumentChannelDelivery(
   if (input.hooks === undefined || input.delivery.deliveryMetadata === undefined) return;
 
   const active: ActiveChannelDelivery[] = [];
-  const channelAudience = normalizeChannelAudience(
-    input.ctx.get(ChannelInstrumentationKey)?.metadata.audience,
-  );
-  const hooks = input.hooks;
+  const channel = input.ctx.get(ChannelInstrumentationKey);
+  const channelAudience = normalizeChannelAudience(channel?.metadata.audience);
+  const hooks =
+    input.hooks.forTrace?.({
+      agentName: input.policyAgentName,
+      audience: channelAudience,
+      channelType: channel?.channelType,
+    }) ?? input.hooks;
   for (const metadata of input.delivery.deliveryMetadata) {
     const payload = input.delivery.payloads[metadata.payloadIndex];
     const delivery = {
@@ -79,11 +90,14 @@ export async function instrumentChannelDelivery(
       requestId: metadata.requestId,
       requestTraceContext: metadata.requestTraceContext,
     };
+    const capturesInputs = hooks.capturesInputs ?? hooks.capturesContent;
     const deliveryInput =
-      !hooks?.capturesContent || payload === undefined ? undefined : projectDeliveryInput(payload);
+      !capturesInputs || payload === undefined ? undefined : projectDeliveryInput(payload);
     const item: ActiveChannelDelivery = {
       agentName: input.agentName,
+      channelType: channel?.channelType,
       delivery,
+      policyAgentName: input.policyAgentName,
       rootSessionId: input.rootSessionId,
       sequence: input.sequence,
       sessionId: input.sessionId,

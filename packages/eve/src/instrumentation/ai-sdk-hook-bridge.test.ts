@@ -24,6 +24,26 @@ const scope: InstrumentationAttemptScope = {
 };
 
 describe("createAiSdkHookBridge", () => {
+  it("withholds content when a bridge is not bound to a trace", async () => {
+    const started = vi.fn();
+    const hooks = createInstrumentationHooks([
+      { events: { "model.call.started": started }, name: "default-policy" },
+    ]);
+    const bridge = createAiSdkHookBridge({ ...scope, channelAudience: "public" }, hooks);
+
+    await Reflect.apply(bridge.onLanguageModelCallStart!, bridge, [
+      {
+        callId: "call-1",
+        instructions: "private instructions",
+        messages: [{ content: "private message", role: "user" }],
+        modelId: "model",
+        provider: "test",
+      },
+    ]);
+
+    expect(started.mock.calls[0]?.[0].input).toBeUndefined();
+  });
+
   it("publishes normalized model lifecycle to every provider", async () => {
     const calls: string[] = [];
     const provider = (name: string): InstrumentationProviderDefinition => {

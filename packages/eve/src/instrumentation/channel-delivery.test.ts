@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { ContextContainer, contextStorage } from "#context/container.js";
 import { ChannelInstrumentationKey, ParentTraceContextKey } from "#context/keys.js";
@@ -11,7 +11,11 @@ import {
   type InstrumentationRuntime,
 } from "#instrumentation/runtime.js";
 
-function bindHooks(hooks: InstrumentationRuntime["hooks"], ctx: ContextContainer) {
+function bindHooks(
+  hooks: InstrumentationRuntime["hooks"],
+  ctx: ContextContainer,
+  agentName?: string,
+) {
   return bindInstrumentationRuntime(
     {
       forceFlush: async () => undefined,
@@ -21,7 +25,7 @@ function bindHooks(hooks: InstrumentationRuntime["hooks"], ctx: ContextContainer
       shutdown: async () => undefined,
     },
     ctx,
-    { rootSessionId: "session-1", sessionId: "session-1" },
+    { agentName, rootSessionId: "session-1", sessionId: "session-1" },
   );
 }
 
@@ -31,7 +35,7 @@ describe("channel delivery instrumentation", () => {
     const metadata: InstrumentationEvent[] = [];
     const hooks = createInstrumentationHooks([
       {
-        capture: "content",
+        tracePolicy: () => ({ emit: true, recordInputs: true, recordOutputs: true }),
         events: {
           "channel.delivery.started": (event) => {
             content.push(event);
@@ -40,6 +44,7 @@ describe("channel delivery instrumentation", () => {
         name: "content",
       },
       {
+        tracePolicy: () => ({ emit: true, recordInputs: false, recordOutputs: false }),
         events: {
           "channel.delivery.started": (event) => {
             metadata.push(event);
@@ -100,7 +105,7 @@ describe("channel delivery instrumentation", () => {
     const events: InstrumentationEvent[] = [];
     const hooks = createInstrumentationHooks([
       {
-        capture: "content",
+        tracePolicy: () => ({ emit: true, recordInputs: true, recordOutputs: true }),
         events: {
           "channel.delivery.started": (event) => {
             events.push(event);
@@ -138,5 +143,65 @@ describe("channel delivery instrumentation", () => {
     );
 
     expect(events[0]).toMatchObject({ input: { message: "secret" } });
+  });
+
+  it("uses delivery-start context when a bound turn publishes the terminal", async () => {
+    const completed = vi.fn();
+    const tracePolicy = vi.fn(({ audience }) => audience === "public");
+    const hooks = createInstrumentationHooks([
+      {
+        events: { "channel.delivery.completed": completed },
+        name: "public-only",
+        tracePolicy,
+      },
+    ]);
+    const ctx = new ContextContainer();
+    ctx.set(ChannelInstrumentationKey, {
+      channelType: "slack",
+      kind: "channel:slack",
+      metadata: { audience: "public" },
+    });
+    const instrumentation = bindHooks(hooks, ctx, "Weather Display Name");
+
+    await contextStorage.run(ctx, async () => {
+      await instrumentation?.instrumentChannelDelivery({
+        agentName: "weather",
+        ctx,
+        delivery: {
+          deliveryMetadata: [
+            {
+              channelKind: "channel:slack",
+              channelName: "slack",
+              deliveryId: "delivery-1",
+              payloadIndex: 0,
+            },
+          ],
+          kind: "deliver",
+          payloads: [{ message: "hello" }],
+        },
+        rootSessionId: "session-1",
+        sequence: 0,
+        sessionId: "session-1",
+        turnId: "turn_0",
+      });
+      ctx.set(ChannelInstrumentationKey, {
+        channelType: "slack",
+        kind: "channel:slack",
+        metadata: { audience: "private" },
+      });
+      await instrumentation?.instrumentChannelDelivery({
+        ctx,
+        includeTurn: true,
+        outcome: "completed",
+      });
+    });
+
+    expect(completed).toHaveBeenCalledOnce();
+    expect(completed.mock.calls[0]?.[0].agentName).toBe("weather");
+    expect(tracePolicy.mock.calls[0]?.[0]).toEqual({
+      agentName: "Weather Display Name",
+      audience: "public",
+      channelType: "slack",
+    });
   });
 });
