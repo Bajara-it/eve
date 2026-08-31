@@ -330,6 +330,7 @@ export type InstrumentationSessionTransitionEvent =
 
 export interface InstrumentationTurnStartedEvent {
   readonly type: "turn.started";
+  readonly agentName?: string;
   readonly idempotencyKey: string;
   readonly parentLineage?: InstrumentationParentLineage;
   readonly parentTraceContext?: InstrumentationTraceContext;

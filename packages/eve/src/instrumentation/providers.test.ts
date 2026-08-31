@@ -208,7 +208,9 @@ describe("finalizeInstrumentationProviders", () => {
     await register("rows", defineInstrumentation({ events: { "turn.started": started } }));
 
     const runtime = finalizeInstrumentationProviders({ serviceName: "weather-agent" });
-    await runtime.hooks.publish(turnStarted);
+    await runtime.hooks.forTrace!({ agentName: "weather-agent", audience: "unknown" }).publish(
+      turnStarted,
+    );
 
     expect(runtime.instrumentationProviders).toBe(true);
     expect(started).toHaveBeenCalledOnce();
@@ -225,7 +227,9 @@ describe("finalizeInstrumentationProviders", () => {
 
       const runtime = finalizeInstrumentationProviders({ serviceName: "weather-agent" });
 
-      expect(runtime.hooks.forTrace?.({ audience: "private" }).capturesContent).toBe(expected);
+      expect(
+        runtime.hooks.forTrace?.({ agentName: "weather", audience: "private" }).capturesContent,
+      ).toBe(expected);
     },
   );
 
@@ -240,7 +244,9 @@ describe("finalizeInstrumentationProviders", () => {
 
     const runtime = finalizeInstrumentationProviders({ serviceName: "weather-agent" });
 
-    expect(runtime.hooks.forTrace?.({ audience: "private" }).capturesContent).toBe(true);
+    expect(
+      runtime.hooks.forTrace?.({ agentName: "weather", audience: "private" }).capturesContent,
+    ).toBe(true);
   });
 
   it("still runs execution when no destination was declared", async () => {

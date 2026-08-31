@@ -43,7 +43,7 @@ export function createInstrumentationDispatcher(
   const providers = [...groups.serialBefore, ...groups.parallel, ...groups.serialAfter];
   const warnedPolicyFailures = new Set<InstrumentationProviderDefinition>();
 
-  const forTrace = (trace: TraceCaptureContext): InstrumentationHooks => {
+  function forTrace(trace: TraceCaptureContext): InstrumentationHooks {
     const snapshots = new WeakMap<object, unknown>();
     const decisions = new Map(
       providers.map((provider) => [
@@ -159,14 +159,11 @@ export function createInstrumentationDispatcher(
     };
 
     return { capturesContent, capturesInputs, capturesOutputs, forTrace, publish };
-  };
+  }
 
-  let unboundHooks: InstrumentationHooks | undefined;
   let loggedUnboundPublish = false;
   return {
-    capturesContent: providers.some(
-      (provider) => provider.tracePolicy === undefined && provider.capture === "content",
-    ),
+    capturesContent: false,
     forTrace,
     async publish(event) {
       if (!loggedUnboundPublish) {
@@ -175,8 +172,6 @@ export function createInstrumentationDispatcher(
           eventType: event.type,
         });
       }
-      unboundHooks ??= forTrace({ audience: "unknown" });
-      await unboundHooks.publish(event);
     },
   };
 }

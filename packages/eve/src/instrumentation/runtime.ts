@@ -136,7 +136,7 @@ export interface PreparedInstrumentationAttempt {
 export type InstrumentationAttempt = InstrumentationAttemptScope;
 
 export interface BoundInstrumentationSession {
-  readonly agentName?: string;
+  readonly agentName: string;
   readonly rootSessionId: string;
   readonly sessionId: string;
 }
@@ -470,7 +470,7 @@ export function bindInstrumentationRuntime(
 }
 
 export function bindSessionInstrumentation(input: {
-  readonly agentName?: string;
+  readonly agentName: string;
   readonly ctx: ContextContainer;
   readonly rootSessionId: string;
   readonly sessionId: string;
@@ -483,7 +483,7 @@ export function bindSessionInstrumentation(input: {
 }
 
 export function initializeSessionInstrumentation(input: {
-  readonly agentName?: string;
+  readonly agentName: string;
   readonly ctx: ContextContainer;
   readonly parentTraceContext?: SessionTraceContext;
 }): void {
@@ -502,7 +502,7 @@ export function initializeSessionInstrumentation(input: {
 }
 
 function allocateSessionTraceSeed(input: {
-  readonly agentName?: string;
+  readonly agentName: string;
   readonly audience: ReturnType<typeof normalizeChannelAudience>;
   readonly channelType?: string;
   readonly parentTraceContext?: SessionTraceContext;
@@ -536,7 +536,7 @@ function allocateSessionTraceSeed(input: {
 
 function resolveStepInstrumentationDecision(
   settings: OtelHarnessSettings | undefined,
-  agentName: string | undefined,
+  agentName: string,
   channel: ChannelInstrumentationProjection | undefined,
   traceSeed: SessionTraceSeed | undefined,
   persisted: InstrumentationDecision | undefined,
