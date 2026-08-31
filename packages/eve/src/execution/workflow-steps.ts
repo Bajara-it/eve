@@ -51,7 +51,7 @@ import { setChannelContext } from "#execution/channel-context.js";
 import { observeSessionActivity } from "#execution/session-activity-projection.js";
 import { hasPendingInputBatch } from "#harness/input-requests.js";
 import { activeTurnId } from "#harness/active-turn-id.js";
-import { coalesceTurnInputs, normalizeUserContent } from "#harness/messages.js";
+import { coalesceTurnInputs } from "#harness/messages.js";
 import {
   getRuntimeActionKeysFromWorkflowInterrupt,
   isWorkflowRuntimeActionInterrupt,
@@ -102,8 +102,9 @@ import { hydrateDurableSession, refreshSessionFromTurnAgent } from "#execution/s
 import { createExecutionHistoryView } from "#execution/history-view.js";
 import { resolveRuntimeCompiledArtifactsVersionedCacheKey } from "#runtime/cache-key.js";
 import { createWorkflowRuntime } from "#execution/workflow-runtime.js";
+import { bindDynamicConnections } from "#execution/dynamic-connections.js";
+import { preserveCancelledTurnMessage } from "#execution/cancelled-turn-message.js";
 import { TASK_UPDATE_TOOL_NAME } from "#tools/framework/task-contract.js";
-import { stageAttachmentsToSandbox } from "#harness/attachment-staging.js";
 
 const TASK_DONE_WITH_PENDING_INPUT_ERROR_MESSAGE =
   "Task mode cannot complete while input requests remain pending.";
@@ -322,6 +323,7 @@ export async function turnStep(rawInput: TurnStepInput): Promise<DurableStepResu
   }
 
   const hookRegistry = bundle.hookRegistry;
+  const dynamicConnections = bindDynamicConnections(ctx, bundle.resolvedAgent);
   const dynamicInstructionsResolvers = bundle.resolvedAgent.dynamicInstructionsResolvers ?? [];
   const dynamicSkillResolvers = bundle.resolvedAgent.dynamicSkillResolvers ?? [];
   const dynamicSubagentResolvers = bundle.subagentRegistry.dynamicResolvers ?? [];
@@ -417,6 +419,7 @@ export async function turnStep(rawInput: TurnStepInput): Promise<DurableStepResu
         },
       });
     }
+    await dynamicConnections.dispatch(emitted);
     await dispatchDynamicSubagentEvent({
       ctx,
       resolvers: dynamicSubagentResolvers,
@@ -459,6 +462,11 @@ export async function turnStep(rawInput: TurnStepInput): Promise<DurableStepResu
         mode,
         session: enrichedSession,
       });
+      await dynamicConnections.rehydrate(
+        initialEmissionState,
+        runtimeIdentity,
+        isHarnessBetweenTurns(schemaSession),
+      );
       if (completedAuths) {
         let emissionState = getHarnessEmissionState(schemaSession.state);
         if (isHarnessBetweenTurns(schemaSession)) {
@@ -685,14 +693,4 @@ export async function turnStep(rawInput: TurnStepInput): Promise<DurableStepResu
     serializedContext: nextSerializedContext,
     sessionState: nextState,
   };
-}
-
-async function preserveCancelledTurnMessage(
-  session: HarnessSession,
-  input: StepInput | undefined,
-): Promise<HarnessSession> {
-  const message = normalizeUserContent(input?.message);
-  if (message === undefined) return session;
-  const content = await stageAttachmentsToSandbox(message);
-  return { ...session, history: [...session.history, { content, role: "user" }] };
 }
