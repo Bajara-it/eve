@@ -157,6 +157,8 @@ export interface InstrumentationRuntime {
   otelSettings: OtelHarnessSettings | undefined;
   readonly runtimeContextResolvers?: readonly RuntimeContextResolver[];
   readonly runInContext: InstrumentationContextRunner;
+  /** Whether the installed OTel sampler would record a trace with this id. */
+  readonly samplesTrace?: (traceId: string) => boolean;
   readonly shutdown: () => Promise<void>;
   stepStartedRuntimeContextResolver?: InstrumentationEvents["step.started"];
 }
@@ -538,11 +540,13 @@ function allocateSessionTraceSeed(input: {
     audience: input.audience,
     channelType: input.channelType,
   });
+  const traceId = input.runtime.idGenerator.generateTraceId();
+  const sampled = decision.action === "record" && (input.runtime.samplesTrace?.(traceId) ?? true);
   return {
     decision,
     spanId: input.runtime.idGenerator.allocateSpanId(),
-    traceFlags: decision.action === "record" ? 1 : 0,
-    traceId: input.runtime.idGenerator.generateTraceId(),
+    traceFlags: sampled ? 1 : 0,
+    traceId,
   };
 }
 

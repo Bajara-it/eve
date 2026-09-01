@@ -91,6 +91,7 @@ export function installInstrumentationRuntime(input: {
     prepareTurnTrace,
     runtimeContextResolvers: input.runtimeContextResolvers,
     runInContext,
+    samplesTrace: otelRuntime?.samplesTrace,
     shutdown: () => {
       shutdown ??= settleAll([
         ...(otelRuntime === undefined ? [] : [otelRuntime.shutdown]),

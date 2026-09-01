@@ -159,6 +159,7 @@ export function registerOtelPipeline(input: {
   return {
     forceFlush: () => provider.forceFlush!(),
     idGenerator,
+    samplesTrace: (traceId) => samplerAdmitsTrace(idGenerator, traceId),
     shutdown: () => provider.shutdown!(),
   };
 }
@@ -167,7 +168,16 @@ export function registerOtelPipeline(input: {
 export interface RegisteredOtelPipeline {
   readonly forceFlush: () => Promise<void>;
   readonly idGenerator: AgentSpanIdGenerator;
+  /** Whether the installed sampler would record a trace with this id. */
+  readonly samplesTrace: (traceId: string) => boolean;
   readonly shutdown: () => Promise<void>;
+}
+
+function samplerAdmitsTrace(idGenerator: AgentSpanIdGenerator, traceId: string): boolean {
+  const probe = idGenerator.withTraceId(traceId, () =>
+    trace.getTracer("eve.registration").startSpan(REGISTRATION_SPAN_NAME, { root: true }),
+  );
+  return (probe.spanContext().traceFlags & 1) === 1;
 }
 
 interface RuntimeTracerProvider {
