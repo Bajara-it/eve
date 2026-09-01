@@ -2,7 +2,11 @@ import type { LanguageModel, ModelMessage, UserContent } from "ai";
 
 import type { SessionAuthContext, SessionCapabilities } from "#channel/types.js";
 import type { AlsContext } from "#context/container.js";
-import type { UnstampedMessageStreamEvent, RuntimeIdentity } from "#protocol/message.js";
+import type {
+  RuntimeIdentity,
+  StepStartedStreamEvent,
+  UnstampedMessageStreamEvent,
+} from "#protocol/message.js";
 import type { RunMode } from "#shared/run-mode.js";
 import type { RuntimeActionResult } from "#shared/action-types.js";
 import type { RuntimeModelReference } from "#runtime/agent/bootstrap.js";
@@ -326,10 +330,10 @@ export interface ToolLoopHarnessConfig {
    * compacted history.
    */
   readonly onCompaction?: () => readonly ModelMessage[];
-  /** Resolves step-scoped dynamic tools once for approval policy and model work. */
-  readonly resolveStepDynamicTools?: (input: {
+  /** Prepares persisted step-scoped tools before an approved call is resumed. */
+  readonly prepareStepDynamicTools?: (input: {
     readonly ctx: AlsContext;
-    readonly event: UnstampedMessageStreamEvent;
+    readonly event: StepStartedStreamEvent;
     readonly messages: readonly ModelMessage[];
   }) => Promise<void>;
   readonly dispatchDynamicModelEvent?: (input: {

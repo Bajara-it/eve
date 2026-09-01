@@ -139,6 +139,7 @@ import {
 import {
   coordinateApprovalDelivery,
   shouldPrepareApprovalPolicyTools,
+  shouldPrepareApprovalReplayTools,
 } from "#harness/approval-delivery-coordinator.js";
 import type { InstrumentationAttempt, InstrumentationStepScope } from "#instrumentation/runtime.js";
 import { ChannelKey } from "#runtime/sessions/runtime-context-keys.js";
@@ -654,11 +655,11 @@ export function createToolLoopHarness(config: ToolLoopHarnessConfig): StepFn {
 
     const approvalContext = contextStorage.getStore();
     if (
+      shouldPrepareApprovalReplayTools({ session, stepInput: effectiveStepInput }) &&
       approvalContext !== undefined &&
-      config.resolveStepDynamicTools !== undefined &&
-      shouldPrepareApprovalPolicyTools({ session, stepInput: effectiveStepInput })
+      config.prepareStepDynamicTools !== undefined
     ) {
-      await config.resolveStepDynamicTools({
+      await config.prepareStepDynamicTools({
         ctx: approvalContext,
         event: createStepStartedEvent({
           modelId: session.agent.modelReference?.id ?? "dynamic",
@@ -669,13 +670,20 @@ export function createToolLoopHarness(config: ToolLoopHarnessConfig): StepFn {
         messages: projectHistory(resolvedRuntimeActions.messages, session.state),
       });
     }
+    // Only persisted policy work can invoke a dynamic tool's approval.response callback.
+    const responseAuthorizationTools = shouldPrepareApprovalPolicyTools({
+      session,
+      stepInput: effectiveStepInput,
+    })
+      ? buildResponseAuthorizationTools({
+          authoredTools: config.tools,
+          context: approvalContext,
+        })
+      : config.tools;
     const coordinated = await coordinateApprovalDelivery({
       session,
       stepInput: effectiveStepInput,
-      tools: buildResponseAuthorizationTools({
-        authoredTools: config.tools,
-        context: approvalContext,
-      }),
+      tools: responseAuthorizationTools,
     });
     session = coordinated.session;
     if (emit) {

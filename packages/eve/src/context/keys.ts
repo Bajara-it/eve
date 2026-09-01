@@ -6,7 +6,6 @@
 
 import type { LanguageModel, ModelMessage, SystemModelMessage } from "ai";
 
-import type { JsonObject } from "#shared/json.js";
 import type { InstrumentationDecision } from "#shared/instrumentation-decision.js";
 import type {
   ActivityObserverConfig,
@@ -23,7 +22,7 @@ import { ContextKey } from "#context/key.js";
 import { SESSION_CALLBACK_CONTEXT_KEY_NAME } from "#context/key-names.js";
 import type { InstrumentationChannelDeliveryRef } from "#instrumentation/lifecycle.js";
 import type { HandleEventFn } from "#harness/types.js";
-import type { DurableDynamicToolCallbacks } from "#tools/durable-callbacks.js";
+import type { PersistedDynamicToolMetadata } from "#context/dynamic-tool-metadata.js";
 import type { DynamicSubagentAgentConfig } from "#runtime/subagents/dynamic-agent-config.js";
 import type { DynamicRemoteAgentConfig } from "#runtime/subagents/dynamic-remote-agent-config.js";
 import type { SandboxAccess } from "#sandbox/state.js";
@@ -188,23 +187,13 @@ export const LiveStepDynamicModelSelectionKey = new ContextKey<LiveDynamicModelS
 // Dynamic tool keys
 // ---------------------------------------------------------------------------
 
-export interface DurableDynamicToolMetadata {
-  readonly callbacks: DurableDynamicToolCallbacks;
-  readonly name: string;
-  readonly description: string;
-  readonly inputSchema: JsonObject;
-  readonly outputSchema?: JsonObject;
-  readonly resolverSlug: string;
-  readonly entryKey: string;
-}
-
 /**
  * Session-scoped dynamic tool metadata (from `session.started`).
  * Persists for the session lifetime.
  */
-export const SessionDynamicToolMetadataKey = new ContextKey<readonly DurableDynamicToolMetadata[]>(
-  "eve.sessionDynamicToolMetadata",
-);
+export const SessionDynamicToolMetadataKey = new ContextKey<
+  readonly PersistedDynamicToolMetadata[]
+>("eve.sessionDynamicToolMetadata");
 
 /**
  * Runtime revision that last resolved session-scoped dynamic tools.
@@ -218,7 +207,7 @@ export const SessionDynamicToolRuntimeRevisionKey = new ContextKey<string>(
  * Turn-scoped dynamic tool metadata (from `turn.started`).
  * Replaced each turn.
  */
-export const TurnDynamicToolMetadataKey = new ContextKey<readonly DurableDynamicToolMetadata[]>(
+export const TurnDynamicToolMetadataKey = new ContextKey<readonly PersistedDynamicToolMetadata[]>(
   "eve.turnDynamicToolMetadata",
 );
 
@@ -262,7 +251,7 @@ export const PreparedMemoryCompactionKey = new ContextKey<PreparedMemoryCompacti
 );
 
 /** Step-scoped dynamic tool metadata, replaced before each model step. */
-export const StepDynamicToolMetadataKey = new ContextKey<readonly DurableDynamicToolMetadata[]>(
+export const StepDynamicToolMetadataKey = new ContextKey<readonly PersistedDynamicToolMetadata[]>(
   "eve.stepDynamicToolMetadata",
 );
 
