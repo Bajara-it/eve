@@ -32,6 +32,7 @@ import { createStubSandboxRegistry } from "#internal/testing/stub-sandbox-regist
 import { defineTool } from "#tools/definition.js";
 import { stampDurableDynamicCallback } from "#tools/durable-callbacks.js";
 import { toInputSchema } from "#tools/schema.js";
+import { AGENT_TOOL_DESCRIPTION } from "#tools/framework/agent-contract.js";
 
 vi.mock("ai", () => ({
   ToolLoopAgent: vi.fn(),
@@ -210,14 +211,35 @@ function createTestNode(
   turnAgent?: RuntimeTurnAgent,
   overrides: Partial<ResolvedRuntimeAgentNode> = {},
 ): ResolvedRuntimeAgentNode {
-  const agent = {} as ResolvedRuntimeAgentNode["agent"];
+  const sandboxRegistry = createStubSandboxRegistry();
+  const agent: ResolvedRuntimeAgentNode["agent"] = {
+    channels: [],
+    connections: [],
+    dynamicConnectionResolvers: [],
+    dynamicInstructionsResolvers: [],
+    dynamicSkillResolvers: [],
+    dynamicToolResolvers: [],
+    hooks: [],
+    instructions: [],
+    memories: [],
+    metadata: {
+      agentRoot: "",
+      appRoot: "",
+      diagnosticsSummary: { errors: 0, warnings: 0 },
+    },
+    sandbox: sandboxRegistry.sandbox.definition,
+    skills: [],
+    tools: [],
+    workspaceResourceRoot: sandboxRegistry.sandbox.workspaceResourceRoot,
+    workspaceSpec: { rootEntries: [] },
+  };
 
   return {
     agent,
     channels: [],
     hookRegistry: createEmptyHookRegistry(),
     nodeId: ROOT_RUNTIME_AGENT_NODE_ID,
-    sandboxRegistry: createStubSandboxRegistry(),
+    sandboxRegistry,
     subagentRegistry: {
       dynamicNodeIds: new Set(),
       dynamicResolvers: [],
@@ -236,18 +258,40 @@ async function createNodeWithSourceOwnedTools(input: {
   readonly tasks?: boolean;
   readonly turnTools?: StaticRuntimeTurnAgent["tools"];
 }): Promise<ResolvedRuntimeAgentNode> {
-  const toolRegistry = await createRuntimeToolRegistry({
-    tools: input.names.map((name) => ({
-      description: `${name} programmatic tool.`,
-      execute: async () => `${name}-sentinel`,
-      inputSchema: null,
-      logicalPath: `tools/${name}.ts`,
-      name,
-      owner: { feature: "test", kind: "framework" },
-      sourceId: `framework:tools/${name}.ts`,
-      sourceKind: "module",
-    })),
-  });
+  const toolRegistry = await createRuntimeToolRegistry(
+    {
+      tools: input.names.map((name) => ({
+        behavior:
+          name === "agent"
+            ? {
+                availability: ["root-session"],
+                handling: { action: "self-agent", kind: "dispatch" },
+              }
+            : name === "ask_question"
+              ? {
+                  availability: ["requires-request-input"],
+                  handling: { kind: "request-input", request: "question" },
+                }
+              : name === "task_cancel"
+                ? {
+                    availability: ["root-session"],
+                    handling: { action: "task-cancel", kind: "dispatch" },
+                  }
+                : {
+                    availability: ["delegated-task-child"],
+                    handling: { action: "task-update", kind: "dispatch" },
+                  },
+        description: name === "agent" ? AGENT_TOOL_DESCRIPTION : `${name} programmatic tool.`,
+        inputSchema: null,
+        logicalPath: `tools/${name}.ts`,
+        name,
+        owner: { feature: "test", kind: "framework" },
+        sourceId: `framework:tools/${name}.ts`,
+        sourceKind: "module",
+      })),
+    },
+    { nodeId: ROOT_RUNTIME_AGENT_NODE_ID },
+  );
   const node = createTestNode(
     createTestTurnAgent({
       tools: [...toolRegistry.preparedTools, ...(input.turnTools ?? [])],
@@ -301,10 +345,13 @@ describe("createNodeHarnessTools", () => {
     expect(agentTool?.description).toContain("include essential context");
     expect(agentTool?.description).toContain("non-overlapping scopes");
     expect(agentTool?.description).not.toContain("eve");
-    expect(agentTool?.runtimeAction).toEqual({
-      kind: "subagent-call",
-      nodeId: ROOT_RUNTIME_AGENT_NODE_ID,
-      subagentName: "agent",
+    expect(agentTool?.behavior?.handling).toEqual({
+      kind: "dispatch",
+      target: {
+        kind: "self-agent-call",
+        nodeId: ROOT_RUNTIME_AGENT_NODE_ID,
+        subagentName: "agent",
+      },
     });
   });
 
@@ -328,7 +375,10 @@ describe("createNodeHarnessTools", () => {
     });
 
     for (const name of ["task_cancel", "task_update"]) {
-      expect(tools.get(name)?.runtimeAction).toEqual({ kind: "task-control" });
+      expect(tools.get(name)?.behavior?.handling).toEqual({
+        kind: "dispatch",
+        target: { kind: name === "task_cancel" ? "task-cancel" : "task-update" },
+      });
       expect(tools.get(name)?.execute).toBeUndefined();
     }
     expect(tools.has("task_sleep")).toBe(false);
@@ -337,6 +387,17 @@ describe("createNodeHarnessTools", () => {
   it("executes compiled local and remote delegation tools in the selected task mode", async () => {
     const delegationTools: StaticRuntimeTurnAgent["tools"] = [
       {
+        behavior: {
+          availability: [],
+          handling: {
+            kind: "dispatch",
+            target: {
+              kind: "subagent-call",
+              nodeId: "subagents/research",
+              subagentName: "research",
+            },
+          },
+        },
         description: "Delegate local research.",
         inputSchema: { type: "object" },
         kind: "subagent",
@@ -346,6 +407,17 @@ describe("createNodeHarnessTools", () => {
         sourceId: "subagents/research",
       },
       {
+        behavior: {
+          availability: [],
+          handling: {
+            kind: "dispatch",
+            target: {
+              kind: "remote-agent-call",
+              nodeId: "remote-agents/reviewer",
+              remoteAgentName: "reviewer",
+            },
+          },
+        },
         description: "Delegate remote review.",
         inputSchema: { type: "object" },
         kind: "remote",
@@ -361,8 +433,14 @@ describe("createNodeHarnessTools", () => {
         turnTools: delegationTools,
       }),
     });
-    expect(legacy.get("research")?.runtimeAction?.kind).toBe("subagent-call");
-    expect(legacy.get("reviewer")?.runtimeAction?.kind).toBe("remote-agent-call");
+    expect(legacy.get("research")?.behavior?.handling).toMatchObject({
+      kind: "dispatch",
+      target: { kind: "subagent-call" },
+    });
+    expect(legacy.get("reviewer")?.behavior?.handling).toMatchObject({
+      kind: "dispatch",
+      target: { kind: "remote-agent-call" },
+    });
     expect(legacy.get("research")?.execution).toBeUndefined();
     expect(legacy.get("reviewer")?.execution).toBeUndefined();
 
@@ -376,14 +454,16 @@ describe("createNodeHarnessTools", () => {
     for (const name of ["agent", "research", "reviewer"]) {
       expect(background.get(name)?.execution).toBe("background");
       expect(background.get(name)?.execute).toBeDefined();
-      expect(background.get(name)?.runtimeAction).toBeUndefined();
+      expect(background.get(name)?.behavior?.handling?.kind).toBe("dispatch");
     }
     expect(
       countLocalSubagentCalls(
         ["agent", "research", "reviewer"].map((name) => {
-          const execute = background.get(name)?.execute;
-          if (execute === undefined) throw new Error(`Missing background executor for ${name}.`);
-          return { definition: { execute } };
+          const definition = background.get(name);
+          if (definition?.execute === undefined) {
+            throw new Error(`Missing background executor for ${name}.`);
+          }
+          return { definition };
         }),
       ),
     ).toBe(2);
@@ -643,6 +723,65 @@ describe("createExecutionNodeStep", () => {
     );
   });
 
+  it("always advertises load_skill when the node has no compiled skills", async () => {
+    setupMockAgentForToolExecution("load_skill", { skill: "deploy-note" });
+    const toolRegistry = await createRuntimeToolRegistry({
+      tools: [
+        {
+          behavior: {
+            availability: [],
+            presentation: "load-skill",
+          },
+          description: "Load one skill.",
+          execute: async () => "deploy-note instructions",
+          inputSchema: toInputSchema({ type: "object" }),
+          logicalPath: "tools/load_skill.ts",
+          name: "load_skill",
+          owner: { feature: "load-skill", kind: "framework" },
+          sourceId: "framework:tools/load_skill.ts",
+          sourceKind: "module",
+        },
+      ],
+    });
+    const rootNode = createTestNode(createTestTurnAgent({ tools: toolRegistry.preparedTools }), {
+      toolRegistry,
+    });
+    expect(rootNode.agent.skills).toEqual([]);
+    const step = createExecutionNodeStep({
+      createRuntime: () => createNoopRuntime(),
+      instrumentation: undefined,
+      mode: "task",
+      modelResolutionScope: { moduleMap: { nodes: {} }, nodeId: undefined },
+      node: rootNode,
+    });
+    const ctx = new ContextContainer();
+    ctx.set(AuthKey, null);
+    ctx.set(InitiatorAuthKey, null);
+    ctx.set(BundleKey, {
+      compiledArtifactsSource: createBundledRuntimeCompiledArtifactsSource(),
+    } as never);
+    ctx.set(ChannelKey, { kind: "http" });
+    ctx.set(SessionIdKey, "sess-root");
+    ctx.set(SessionKey, {
+      auth: { current: null, initiator: null },
+      sessionId: "sess-root",
+      turn: { id: "root-turn", sequence: 0 },
+    });
+
+    const result = await contextStorage.run(ctx, () =>
+      step(
+        createSession({
+          continuationToken: "test-root",
+          sessionId: "sess-root",
+          turnAgent: rootNode.turnAgent,
+        }),
+        { message: "Load the deploy note skill." },
+      ),
+    );
+
+    expect(result.next).toEqual({ done: true, output: "deploy-note instructions" });
+  });
+
   it("records visible subagent tools as pending runtime actions", async () => {
     setupMockAgentForToolCall("child-agent", { task: "Delegate this." });
 
@@ -653,6 +792,17 @@ describe("createExecutionNodeStep", () => {
       createTestTurnAgent({
         tools: [
           {
+            behavior: {
+              availability: [],
+              handling: {
+                kind: "dispatch",
+                target: {
+                  kind: "subagent-call",
+                  nodeId: "child-node",
+                  subagentName: "child-agent",
+                },
+              },
+            },
             description: "Delegate work to the child agent.",
             inputSchema: { type: "object" },
             kind: "subagent",
@@ -708,10 +858,12 @@ describe("createExecutionNodeStep", () => {
           callId: "call-subagent-1",
           description: "Delegate work to the child agent.",
           input: { task: "Delegate this." },
-          kind: "subagent-call",
-          name: "child-agent",
-          nodeId: "child-node",
-          subagentName: "child-agent",
+          target: {
+            kind: "subagent-call",
+            nodeId: "child-node",
+            subagentName: "child-agent",
+          },
+          toolName: "child-agent",
         },
       ],
       event: {
