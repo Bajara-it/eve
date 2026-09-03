@@ -6,7 +6,6 @@ import { resolveInternalVercelServiceOutput } from "#cli/vercel-service-output.j
 import { createCliTheme, renderCliTaggedLine } from "#cli/ui/output.js";
 import { EVE_INTERNAL_AGENT_WORKSPACE_MEMBER_ENV } from "#internal/application/build-output-environment.js";
 import type { ApplicationBuildOptions } from "#internal/nitro/host/types.js";
-import { resolveEveProjectContext } from "#internal/project-context.js";
 import {
   EVE_PUBLIC_ROUTE_PREFIX_ENV,
   normalizePublicRoutePrefix,
@@ -35,7 +34,7 @@ export function registerBuildCommand(input: {
   input.program
     .command("build")
     .hook("preAction", async () => {
-      const context = await resolveEveProjectContext(input.applicationContext.root);
+      const context = await input.applicationContext.resolveAgent();
       if (context.kind !== "workspace") await input.applicationContext.resolve();
     })
     .description("Build the current eve application.")
@@ -49,7 +48,7 @@ export function registerBuildCommand(input: {
 
       await loadDevelopmentEnvironmentFiles(input.applicationContext.root);
 
-      const projectContext = await resolveEveProjectContext(input.applicationContext.root);
+      const projectContext = await input.applicationContext.resolveAgent();
       if (projectContext.kind === "workspace") {
         if (options.profile !== undefined || options.skipSandboxPrewarm === true) {
           throw new Error(
