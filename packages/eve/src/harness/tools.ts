@@ -76,7 +76,14 @@ export function buildToolSet(input: {
     backgroundBatch.setTool(
       definition.name,
       definition.execution === "background" && definition.execute !== undefined
-        ? (definition as BackgroundExecutableTool)
+        ? {
+            execute: definition.execute,
+            executeInput: definition.executeInput,
+            name: definition.name,
+            nodeId: definition.nodeId,
+            resultKind: definition.resultKind,
+            workflowId: definition.workflowId,
+          }
         : undefined,
     );
     const authorToModelOutput = definition.toModelOutput;
