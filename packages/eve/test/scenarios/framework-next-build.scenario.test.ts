@@ -129,7 +129,7 @@ async function readVercelOutputRoutes(outputRoot: string): Promise<readonly unkn
 
 async function runVercelBuild(appRoot: string): Promise<void> {
   await runPnpmCommand({
-    args: ["exec", "vercel", "build", "--yes"],
+    args: ["exec", "./node_modules/.bin/vercel", "build", "--yes"],
     cwd: appRoot,
     env: {
       ...process.env,
