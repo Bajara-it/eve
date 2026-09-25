@@ -12,6 +12,7 @@ import { isHookConflictError } from "#execution/hook-ownership.js";
 import { createSessionInbox, type SessionInboxHandle } from "#execution/session-inbox/inbox.js";
 import { sessionHookTokens } from "#execution/session/hook-tokens.js";
 import { DEFAULT_SESSION_TIMEOUT_MS, sessionTimeoutDeadline } from "#execution/session/timeout.js";
+import { hasDelegatedSessionContext } from "#execution/delegated-session-context.js";
 import type { DynamicSubagentAgentConfig } from "#runtime/subagents/dynamic-agent-config.js";
 import { attachClientContext, readClientContext } from "#internal/client-context.js";
 import { settleContinuationConflictStep } from "#execution/continuation-conflict-step.js";
@@ -127,7 +128,7 @@ async function bootInitialOwner(
       inbox,
       session: {
         anchor: { kind: "self" },
-        caller: hasDelegatedCallerContext(serializedContext)
+        caller: hasDelegatedSessionContext(serializedContext)
           ? await resolveInitialTurnCallerStep({ serializedContext })
           : undefined,
         capabilities: serializedContext["eve.capabilities"] as SessionCapabilities | undefined,

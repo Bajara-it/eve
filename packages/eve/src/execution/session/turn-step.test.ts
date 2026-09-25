@@ -369,7 +369,7 @@ describe("routeProxiedDeliverStep", () => {
     );
   });
 
-  it("answers a question once when one delivery carries several messages", async () => {
+  it("answers a root question once when one delivery carries several messages", async () => {
     const session = upsertProxyInputRequests({
       entries: [
         [
@@ -404,6 +404,57 @@ describe("routeProxiedDeliverStep", () => {
     expect(result).toMatchObject({
       kind: "continue",
       remainder: { payloads: [{ message: "Also check the logs." }] },
+    });
+  });
+
+  it.each([
+    ["local", { "eve.channel": { kind: "subagent" } }],
+    [
+      "remote",
+      {
+        "eve.sessionCallback": {
+          callId: "parent-call",
+          subagentName: "research",
+          token: "parent-token",
+          url: "https://parent.example/eve/v1/callback/parent-token",
+        },
+      },
+    ],
+  ])("does not answer a delegated %s question from steering text", async (_, serializedContext) => {
+    const session = upsertProxyInputRequests({
+      entries: [
+        [
+          "ask-1",
+          {
+            answerHook: {
+              question: {
+                allowFreeform: false,
+                dismissible: false,
+                options: [{ id: "approve", label: "Approve" }],
+              },
+              runId: "run-1",
+            },
+            childContinuationToken: "answer-token",
+            kind: "question",
+          },
+        ],
+      ],
+      forChildContinuationToken: "answer-token",
+      session: createStubSession(),
+    });
+    installSessionStoreMocks([session]);
+
+    const result = await routeProxiedDeliverStep({
+      delivery: { kind: "deliver", payloads: [{ message: "Approve" }] },
+      serializedContext,
+      sessionWritable: createTestWritable(),
+      sessionState: createStubSessionState({ hasProxyInputRequests: true }),
+    });
+
+    expect(resumeHookMock).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      kind: "continue",
+      remainder: { payloads: [{ message: "Approve" }] },
     });
   });
 
@@ -769,6 +820,7 @@ describe("recordTaskInputRequestStep", () => {
       childContinuationToken: "eve:workflow-tool-run-answer:run-1:0",
       childRequestId: "request-1",
       kind: "question",
+      question: {},
       taskId: "task-1",
     });
     expect(result).toMatchObject({
