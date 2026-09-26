@@ -1,18 +1,145 @@
 import { describe, expect, it } from "vitest";
 
-import { compileAgent } from "../../src/compiler/compile-agent.js";
-import { createDiskRuntimeCompiledArtifactsSource } from "../../src/runtime/compiled-artifacts-source.js";
-import { loadCompiledManifest } from "../../src/runtime/loaders/manifest.js";
-import { loadCompiledModuleMapFromAuthoredSource } from "../../src/internal/authored-module-map-loader.js";
-import { resolveRuntimeAgentGraph } from "../../src/runtime/resolve-agent-graph.js";
-import { useScenarioApp } from "../../src/internal/testing/scenario-app.js";
+import { compileAgent } from "#compiler/compile-agent.js";
+import { loadCompiledModuleMapFromAuthoredSource } from "#internal/authored-module-map-loader.js";
+import { useTemporaryAppRoots } from "#internal/testing/use-temporary-app-roots.js";
+import { createDiskRuntimeCompiledArtifactsSource } from "#runtime/compiled-artifacts-source.js";
+import { loadCompiledManifest } from "#runtime/loaders/manifest.js";
+import { resolveRuntimeAgentGraph } from "#runtime/resolve-agent-graph.js";
 
-const scenarioApp = useScenarioApp();
-const compatibilityManifest = JSON.stringify({
-  kind: "eve-extension",
-  formatVersion: 1,
-  builtWithEve: "0.0.0-test",
-  requires: { extension: 1, tool: 1, dynamicTool: 1, config: 1 },
+const createAppRoot = useTemporaryAppRoots();
+
+function compatibilityManifest(requires: Readonly<Record<string, number>>): string {
+  return JSON.stringify({
+    kind: "eve-extension",
+    formatVersion: 1,
+    builtWithEve: "0.0.0-test",
+    requires,
+  });
+}
+
+/**
+ * Compiles the app and hydrates the module map from authored source, the
+ * `eve eval` / `eve dev` path.
+ */
+async function compileRuntimeGraph(appRoot: string) {
+  await compileAgent({ startPath: appRoot });
+  const compiledArtifactsSource = createDiskRuntimeCompiledArtifactsSource(appRoot);
+  const [manifest, moduleMap] = await Promise.all([
+    loadCompiledManifest({ compiledArtifactsSource }),
+    loadCompiledModuleMapFromAuthoredSource({ compiledArtifactsSource }),
+  ]);
+  return { graph: await resolveRuntimeAgentGraph({ manifest, moduleMap }), manifest, moduleMap };
+}
+
+/**
+ * Runs the `eve eval` / `eve dev` path: the module map is hydrated from authored
+ * source, so the extension-scope plugin must bind config across separately-bundled
+ * mount and tool modules. Deterministic guard for the config-binding regression.
+ */
+describe("mounted extension via authored-source loader", () => {
+  it("binds mounted config so a composed tool reads it", async () => {
+    const app = await createAppRoot("eve-mounted-extension-authored-source-", {
+      files: {
+        "agent/agent.mjs": 'export default { model: "openai/gpt-5.4" };\n',
+        "agent/instructions.md": "You are a precise assistant.\n",
+        "agent/extensions/crm.mjs": [
+          'import crm from "@acme/crm";',
+          'export default crm({ apiKey: "sk-authored" });',
+          "",
+        ].join("\n"),
+        "node_modules/@acme/crm/package.json": `${JSON.stringify({
+          name: "@acme/crm",
+          type: "module",
+          eve: { extension: { source: "source", dist: "extension" } },
+          exports: { ".": "./extension/extension.mjs" },
+        })}\n`,
+        "node_modules/@acme/crm/extension/_manifest.json": compatibilityManifest({
+          extension: 1,
+          tool: 1,
+          config: 1,
+        }),
+        "node_modules/@acme/crm/extension/extension.mjs": [
+          'import { defineExtension } from "eve/extension";',
+          // Minimal pass-through Standard Schema — this scenario tests binding, not validation.
+          "const config = { '~standard': { version: 1, vendor: 'scenario', validate: (value) => ({ value }) } };",
+          "export default defineExtension({ config });",
+          "",
+        ].join("\n"),
+        "node_modules/@acme/crm/extension/tools/crm_echo.mjs": [
+          'import { defineTool } from "eve/tools";',
+          'import extension from "../extension.mjs";',
+          "export default defineTool({",
+          '  description: "Echo the configured API key.",',
+          "  inputSchema: { type: 'object', properties: {}, additionalProperties: false },",
+          "  async execute() {",
+          "    return { apiKey: extension.config.apiKey };",
+          "  },",
+          "});",
+          "",
+        ].join("\n"),
+      },
+    });
+
+    const { graph } = await compileRuntimeGraph(app.appRoot);
+
+    const tool = graph.root.agent.tools.find((entry) => entry.name === "crm__crm_echo");
+    expect(tool).toBeDefined();
+    await expect(tool?.execute?.({}, { messages: [], toolCallId: "call_1" })).resolves.toEqual({
+      apiKey: "sk-authored",
+    });
+  });
+});
+
+/**
+ * A no-config extension (`defineExtension()`, no schema) mounted with a bare
+ * re-export — no factory call. Proves config is optional end to end through the
+ * dev/eval loader.
+ */
+describe("mounted extension without config", () => {
+  it("composes and runs a no-config extension mounted via re-export", async () => {
+    const app = await createAppRoot("eve-mounted-extension-no-config-", {
+      files: {
+        "agent/agent.mjs": 'export default { model: "openai/gpt-5.4" };\n',
+        "agent/instructions.md": "You are a precise assistant.\n",
+        "agent/extensions/widget.mjs": 'export { default } from "@acme/widget";\n',
+        "node_modules/@acme/widget/package.json": `${JSON.stringify({
+          name: "@acme/widget",
+          type: "module",
+          eve: { extension: { source: "source", dist: "extension" } },
+          exports: { ".": "./extension/extension.mjs" },
+        })}\n`,
+        "node_modules/@acme/widget/extension/_manifest.json": compatibilityManifest({
+          extension: 1,
+          tool: 1,
+        }),
+        "node_modules/@acme/widget/extension/extension.mjs": [
+          'import { defineExtension } from "eve/extension";',
+          "export default defineExtension();",
+          "",
+        ].join("\n"),
+        "node_modules/@acme/widget/extension/tools/widget_ping.mjs": [
+          'import { defineTool } from "eve/tools";',
+          "export default defineTool({",
+          '  description: "Return a fixed widget token.",',
+          "  inputSchema: { type: 'object', properties: {}, additionalProperties: false },",
+          "  async execute() {",
+          '    return { token: "widget-ok" };',
+          "  },",
+          "});",
+          "",
+        ].join("\n"),
+      },
+    });
+
+    const { graph } = await compileRuntimeGraph(app.appRoot);
+
+    const tool = graph.root.agent.tools.find((entry) => entry.name === "widget__widget_ping");
+    expect(tool).toBeDefined();
+    await expect(tool?.execute?.({}, { messages: [], toolCallId: "call_1" })).resolves.toEqual({
+      token: "widget-ok",
+    });
+  });
 });
 
 /**
@@ -23,9 +150,7 @@ const compatibilityManifest = JSON.stringify({
  */
 describe("mounted extension via directory form with override", () => {
   it("binds base config and lets a co-located override shadow or disable a tool", async () => {
-    const app = await scenarioApp({
-      name: "mounted-extension-directory-override",
-      installDependencies: true,
+    const app = await createAppRoot("eve-mounted-extension-directory-override-", {
       files: {
         "agent/agent.mjs": 'export default { model: "openai/gpt-5.4" };\n',
         "agent/instructions.md": "You are a precise assistant.\n",
@@ -64,7 +189,12 @@ describe("mounted extension via directory form with override", () => {
           eve: { extension: { source: "source", dist: "extension" } },
           exports: { ".": "./extension/extension.mjs" },
         })}\n`,
-        "node_modules/@acme/crm/extension/_manifest.json": compatibilityManifest,
+        "node_modules/@acme/crm/extension/_manifest.json": compatibilityManifest({
+          extension: 1,
+          tool: 1,
+          dynamicTool: 1,
+          config: 1,
+        }),
         "node_modules/@acme/crm/extension/extension.mjs": [
           'import { defineExtension } from "eve/extension";',
           "const config = { '~standard': { version: 1, vendor: 'scenario', validate: (value) => ({ value }) } };",
@@ -124,14 +254,7 @@ describe("mounted extension via directory form with override", () => {
       },
     });
 
-    await compileAgent({ startPath: app.appRoot });
-
-    const compiledArtifactsSource = createDiskRuntimeCompiledArtifactsSource(app.appRoot);
-    const [manifest, moduleMap] = await Promise.all([
-      loadCompiledManifest({ compiledArtifactsSource }),
-      loadCompiledModuleMapFromAuthoredSource({ compiledArtifactsSource }),
-    ]);
-    const graph = await resolveRuntimeAgentGraph({ manifest, moduleMap });
+    const { graph } = await compileRuntimeGraph(app.appRoot);
 
     const echo = graph.root.agent.tools.find((entry) => entry.name === "crm__crm_echo");
     expect(echo).toBeDefined();
@@ -155,9 +278,7 @@ describe("mounted extension via directory form with override", () => {
   });
 
   it("replaces extension local and remote subagents with remote overrides", async () => {
-    const app = await scenarioApp({
-      name: "mounted-extension-subagent-override-repro",
-      installDependencies: true,
+    const app = await createAppRoot("eve-mounted-extension-subagent-override-repro-", {
       files: {
         "agent/agent.mjs": 'export default { model: "openai/gpt-5.4" };\n',
         "agent/instructions.md": "You are a precise assistant.\n",
@@ -188,11 +309,9 @@ describe("mounted extension via directory form with override", () => {
           eve: { extension: { source: "source", dist: "extension" } },
           exports: { ".": "./extension/extension.mjs" },
         })}\n`,
-        "node_modules/@acme/crm/extension/_manifest.json": JSON.stringify({
-          kind: "eve-extension",
-          formatVersion: 1,
-          builtWithEve: "0.0.0-test",
-          requires: { extension: 1, subagent: 6 },
+        "node_modules/@acme/crm/extension/_manifest.json": compatibilityManifest({
+          extension: 1,
+          subagent: 6,
         }),
         "node_modules/@acme/crm/extension/extension.mjs": [
           'import { defineExtension } from "eve/extension";',
